@@ -232,9 +232,14 @@ services:
 ProxLB can run in its own LXC container on the cluster, with a **ProxLB** tab in the Proxmox web interface (*Datacenter → ProxLB*). The tab shows node usage, the balance spread and planned or performed migrations, and has buttons for a dry-run preview, a rebalance and automatic balancing. Run this as root on one Proxmox VE node:
 
 ```bash
-git clone https://github.com/jwklijnsma/ProxLB.git
-bash ProxLB/contrib/proxmox/proxlb-lxc.sh            # see --help for IP, storage, schedule, ...
+# on every node: the proxlb-pve package (GUI plugin + proxlb-lxc installer)
+wget https://github.com/jwklijnsma/ProxLB/releases/download/proxlb-pve-nightly/proxlb-pve_latest_all.deb
+apt install ./proxlb-pve_latest_all.deb
+# on one node: create the ProxLB container
+proxlb-lxc                                           # see --help for IP, storage, schedule, HA, ...
 ```
+
+Without the package: `git clone https://github.com/jwklijnsma/ProxLB.git && bash ProxLB/contrib/proxmox/proxlb-lxc.sh`.
 
 ![ProxLB tab in the Proxmox web interface](docs/images/proxlb-gui.png)
 

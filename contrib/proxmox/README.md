@@ -32,7 +32,39 @@ do or has done.
 No extra ports, reverse proxy, CORS or certificates are needed. The GUI only
 uses the normal Proxmox API with the logged-in user's session.
 
-## Install
+## Install as .deb package (recommended)
+
+GitHub Actions builds the **`proxlb-pve`** package on every change
+([workflow](../../.github/workflows/50-build-deb-proxlb-pve.yml)). Install it on **every** node whose web
+interface you use:
+
+```bash
+wget https://github.com/jwklijnsma/ProxLB/releases/download/proxlb-pve-nightly/proxlb-pve_latest_all.deb
+apt install ./proxlb-pve_latest_all.deb
+```
+
+Tagged versions (`v*`) are on the [releases page](https://github.com/jwklijnsma/ProxLB/releases).
+`proxlb-pve-nightly` always holds the latest build of `main`.
+
+The package:
+
+* enables the **Datacenter → ProxLB** tab right away on that node,
+* re-applies it automatically after every `pve-manager` update (dpkg trigger, no apt hook),
+* brings the **`proxlb-lxc`** command with the ProxLB source bundled, so no git is needed on the host,
+* replaces an earlier script install of the plugin on that node,
+* removes the tab cleanly with `apt remove proxlb-pve`.
+
+Then create the container on **one** node. Options are the same as below:
+
+```bash
+proxlb-lxc --ip 192.168.1.50/24 --gw 192.168.1.1
+proxlb-lxc --upgrade <CTID>        # after updating the package: update ProxLB in the CT
+```
+
+Build it yourself: `contrib/proxmox/packaging/build-deb.sh` (output in `dist/`). To test:
+`contrib/proxmox/packaging/test-deb.sh dist/proxlb-pve_*_all.deb` (as root on a throwaway Debian box or container).
+
+## Install from git
 
 On **one** Proxmox VE node, as root:
 
@@ -169,7 +201,9 @@ GitHub Actions (`.github/workflows/15-contrib-proxmox.yml`) runs on every change
 * **agent tests** on Python 3.11 and 3.13 (Debian 12 / 13 containers),
 * **GUI tests** (`node --test contrib/proxmox/gui/tests/plugin.test.js`), plus a render on real
   ExtJS that fails on any page error. The screenshots are uploaded as an artifact,
-* an **installer bundle** (`proxlb-proxmox.tar.gz`) as an artifact, ready to copy to a node.
+* an **installer bundle** (`proxlb-proxmox.tar.gz`) as an artifact, ready to copy to a node,
+* the **`proxlb-pve` .deb** (`50-build-deb-proxlb-pve.yml`): build + lintian, install/trigger/upgrade/remove
+  tests on Debian bookworm and trixie, a nightly pre-release from `main`, and a release for `v*` tags.
 
 Locally: `node --test contrib/proxmox/gui/tests/plugin.test.js` and
 `pytest tests/test_contrib_proxmox_agent.py`.
