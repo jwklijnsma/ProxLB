@@ -2,13 +2,15 @@
 
 This guide shows how to add the **ProxLB** tab to the Proxmox VE web interface
 (*Datacenter → ProxLB*) and connect it to a ProxLB instance. It covers a new
-install, and connecting a ProxLB container you already have.
+container, a ProxLB container you already have, and **ProxLB on another
+machine** (a VM outside the cluster, a physical server, a Docker host).
 
 ![ProxLB tab in the Proxmox web interface](../../docs/images/proxlb-gui.png)
 
 - [How the plugin talks to ProxLB](#how-the-plugin-talks-to-proxlb)
 - [Step 1 - Add the plugin to the web interface](#step-1---add-the-plugin-to-the-web-interface)
 - [Step 2 - Connect the plugin to ProxLB](#step-2---connect-the-plugin-to-proxlb)
+  - [C. ProxLB on another machine](#c-proxlb-on-another-machine)
 - [Step 3 - Check the connection](#step-3---check-the-connection)
 - [Who may see and use the tab](#who-may-see-and-use-the-tab)
 - [Troubleshooting](#troubleshooting)
@@ -44,6 +46,8 @@ So "connecting" the plugin to ProxLB means:
 
 `proxlb-lxc` sets all of this up for you ([Step 2A](#a-new-container-recommended)).
 For a container you already have, see [Step 2B](#b-connect-an-existing-proxlb-container).
+If ProxLB runs **outside** the cluster, a tiny *anchor VM* takes the container's
+place as the mailbox ([Step 2C](#c-proxlb-on-another-machine)).
 
 > If several containers have the tag `proxlb`, the plugin uses the one with the lowest ID.
 
@@ -213,6 +217,76 @@ The agent takes the interval from `service.schedule` in your `proxlb.yaml`.
 > **API host:** the agent tries every entry of `proxmox_api.hosts` in turn.
 > List all nodes there, so it keeps working when one node is down.
 
+### C. ProxLB on another machine
+
+Use this when ProxLB runs **outside** the cluster: a VM on another hypervisor, a
+physical server, your management box, or a Docker host.
+
+![ProxLB on another machine](../../docs/images/proxlb-gui-external.png)
+
+*The tab shows where ProxLB really runs (`mgmt01.lan`), with the anchor VM that carries the status (sample data).*
+
+There's no ProxLB container in the cluster to hold the status, so a tiny
+**anchor VM** is used instead:
+
+```
+ Proxmox web interface ──► anchor VM 9000 (tag "proxlb", Notes + tags)  ◄── HTTPS :8006 ──  proxlb-agent + ProxLB
+                            no disks, no network, never started                           on mgmt01 (outside the cluster)
+```
+
+The anchor VM uses **no storage and no RAM**. It's protected against deletion
+and HA-managed (state *stopped*), so it moves to a surviving node when its node fails.
+
+**1. On one Proxmox VE node** (as root), create the anchor VM, the API token and the bundle:
+
+```bash
+proxlb-external                      # with the proxlb-pve .deb
+# or: bash ProxLB/contrib/proxmox/proxlb-external.sh
+```
+
+It prints the next steps and writes **`/root/proxlb-external-<VMID>.tar`** (mode 0600). The bundle contains:
+- the API hosts (all cluster nodes),
+- the token `proxlb@pve!external<VMID>` (role `ProxLB` on `/`, plus `ProxLBAgent` on the anchor only),
+- the cluster CA, so the agent can verify TLS.
+
+**2. Copy the bundle to the ProxLB machine.** It holds a secret, so keep it private:
+
+```bash
+scp /root/proxlb-external-9000.tar root@mgmt01:/root/
+```
+
+**3. On the ProxLB machine** (as root; Debian/Ubuntu or RHEL-like with systemd and python3):
+
+```bash
+git clone https://github.com/jwklijnsma/ProxLB.git
+bash ProxLB/contrib/proxmox/agent/install-agent.sh --bundle /root/proxlb-external-9000.tar
+rm /root/proxlb-external-9000.tar
+```
+
+`install-agent.sh`:
+- **finds ProxLB's Python:** upstream `.deb` (`/opt/venvs/proxlb`), a `/opt/proxlb/venv`, or the system Python. If none has ProxLB, it installs ProxLB into `/opt/proxlb/venv`.
+- **trusts the cluster CA** in the system store (Debian or RHEL style).
+- **sets `proxmox_api` in `/etc/proxlb/proxlb.yaml`** to the bundle's token and all nodes, keeping all your other settings. A backup `proxlb.yaml.bak-<date>` is written first. Use `--keep-api-config` to leave your API settings alone; that user then needs `VM.Config.Options` on `/vms/<VMID>`.
+- **writes `/etc/proxlb/agent.yaml`** (`vmid: <VMID>`, `guest_type: qemu`) and installs `proxlb-agent.service`.
+- **disables `proxlb.service`**, so that only the agent schedules runs. It warns if a ProxLB **Docker** container is running: stop that yourself.
+
+**4. Reload the web interface** (Ctrl+F5). Within ~30 seconds, *Datacenter → ProxLB*
+shows **"ProxLB runs on mgmt01 - external"**.
+
+Requirements and notes:
+- **Network:** the ProxLB machine must reach every node on **TCP 8006**. Nothing has to connect *to* the ProxLB machine.
+- **Node failure:** the agent tries every node in `proxmox_api.hosts`, so it keeps working when one node is down.
+- **New token** (e.g. after a leak): `proxlb-external --rotate-token --vmid <VMID>`, then run `install-agent.sh --bundle ...` again.
+- **Remove the agent:** `install-agent.sh --uninstall` turns `proxlb.service` back on. Then remove the anchor VM: `qm set <VMID> --protection 0 && ha-manager remove vm:<VMID> && qm destroy <VMID>`.
+
+> **About TLS and older clusters.** Proxmox root CAs created before
+> pve-cluster 9.1.2 have no *keyUsage* extension (Proxmox bug #6701). Python 3.13
+> and urllib3 2.x reject such a CA in strict mode ("CA cert does not include key
+> usage extension"). The agent keeps **full chain and hostname verification** and
+> relaxes only that strict check, for itself and for the ProxLB runs it starts.
+> To force strict mode, set `tls_relax_x509_strict: false` in `agent.yaml`. That
+> works once your cluster has a new CA.
+
 ---
 
 ## Step 3 - Check the connection
@@ -222,6 +296,7 @@ Reload *Datacenter → ProxLB*. A connected setup looks like this:
 | Line | Expected |
 |---|---|
 | **Container** | `CT <id> (proxlb) on <node>`, **running**, `HA: started` (or `HA: off`) |
+| **ProxLB** *(another machine)* | `runs on <host>`, **external**, `status via anchor VM <id>`, `HA: stopped` (this is normal) |
 | **Last run** | `OK - N migration(s) planned`, with a recent time |
 | **Automatic balancing** | `off` (dry-run only) until you switch it on, plus the next run time |
 | **Cluster** | `healthy` |
@@ -270,6 +345,9 @@ allow the tags `proxlb-cmd-dryrun`, `proxlb-cmd-run` and `proxlb-active` for the
 | **command queued** that never finishes | The agent doesn't pick up tags: it's stopped, or it watches another CTID (`ctid:` in `/etc/proxlb/agent.yaml`). |
 | **Rebalance now** greyed out | The cluster is degraded (node offline or HA recovering), so balancing is paused on purpose. Or a run is in progress. |
 | buttons give **permission denied** | The user lacks `VM.Config.Options` on `/vms/<CTID>`, or tags are restricted ([see above](#who-may-see-and-use-the-tab)). |
+| **waiting for agent** | The guest is found but the agent never reported. Check that the agent is running. For another machine, check TCP 8006 to the nodes and the token. |
+| agent log: **CA cert does not include key usage extension** | Old Proxmox CA (bug #6701) and `tls_relax_x509_strict: false`. Remove that line, or create a new cluster CA. |
+| agent log: **certificate verify failed** (other reasons) | The cluster CA isn't trusted on that machine. Run `install-agent.sh --bundle` again, or copy `/etc/pve/pve-root-ca.pem` into the system CA store. |
 | tab gone after a Proxmox update | Script install: the apt hook should re-apply it, so run `proxlb-gui --reapply`. The `.deb` does this through its dpkg trigger. |
 
 Useful commands inside the container: `proxlb-ctl status | last | logs | dryrun | run | config`.

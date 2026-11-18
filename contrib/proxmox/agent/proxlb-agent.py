@@ -9,7 +9,7 @@ How it works
   (``python -m proxlb -j``) every ``service.schedule`` of the ProxLB config.
 * After every run it writes a compact status (last run, planned/performed
   migrations, node usage) into the *Notes* (description) of its own
-  container through the Proxmox API. The ProxLB GUI plugin reads it back
+  container (or of an anchor VM, see below) through the Proxmox API. The ProxLB GUI plugin reads it back
   with the logged-in user's normal session - no extra ports, no CORS.
 * The GUI sends commands by adding tags to the container:
     proxlb-cmd-dryrun   run a dry-run (preview) now
@@ -20,15 +20,20 @@ How it works
   (ha-manager, see proxlb-lxc.sh --ha). The agent talks to any reachable
   cluster node and pauses real balancing while the cluster is degraded
   (a node offline or HA recovering guests), so it never fights HA recovery.
+* ProxLB on another machine: the status lives in a small "anchor" VM
+  (no disks, never started) with the tag ``proxlb`` - set ``guest_type: qemu``
+  and ``vmid`` (see contrib/proxmox/proxlb-external.sh).
 * Local triggers also work: ``touch /var/lib/proxlb/trigger-dryrun`` or
   ``/var/lib/proxlb/trigger-run`` (see ``proxlb-ctl``).
 """
 
 import argparse
+import importlib.util
 import json
 import logging
 import os
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -42,16 +47,33 @@ import yaml
 
 Json = dict[str, Any]
 
-AGENT_VERSION = "1.1.0"
+AGENT_VERSION = "1.2.0"
 STATUS_MARKER = "<!--proxlb-status:"
 TAG_CMD_DRYRUN = "proxlb-cmd-dryrun"
 TAG_CMD_RUN = "proxlb-cmd-run"
 TAG_ACTIVE = "proxlb-active"
+TLS_RELAX_DIR = Path(__file__).resolve().parent / "tls-relax"
 DESCRIPTION_LIMIT = 7800          # PVE limits the description to 8 KiB
 HEARTBEAT_SECONDS = 300
 MAX_MOVES = 80
 
 log = logging.getLogger("proxlb-agent")
+
+
+def enable_tls_relax() -> Optional[str]:
+    """Relax only VERIFY_X509_STRICT (old Proxmox CAs lack keyUsage, PVE bug
+    #6701) in this process; return the directory to put on PYTHONPATH so the
+    ProxLB runs get the same. Chain and hostname stay verified."""
+    module = TLS_RELAX_DIR / "sitecustomize.py"
+    if not module.is_file():
+        log.warning("%s not found - strict X.509 checks stay on", module)
+        return None
+    spec = importlib.util.spec_from_file_location("proxlb_tls_relax", module)
+    if spec is None or spec.loader is None:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return str(TLS_RELAX_DIR)
 
 
 # --------------------------------------------------------------------------
@@ -206,6 +228,7 @@ def render_description(status: Json) -> str:
             f"| Cluster | {'degraded - balancing paused: ' + st['paused'] if st.get('paused') else 'healthy'} |",
             f"| Next scheduled run | {fmt_time(st.get('next_run'))} |",
             f"| Method | {st.get('method')} / {st.get('mode')} (balanciness {st.get('balanciness')}) |",
+            f"| ProxLB runs on | {st.get('host') or '-'} |",
             "",
             "Open **Datacenter → ProxLB** for the full view.",
             "",
@@ -272,23 +295,26 @@ class Pve:
     def reset(self) -> None:
         self.api = None
 
-    def cluster_state(self, ctid: int) -> tuple[str, list[str], list[Json]]:
-        """Node and tags of our container plus all cluster resources."""
+    def cluster_state(self, vmid: int, guest_type: str = "lxc") -> tuple[str, list[str], list[Json]]:
+        """Node and tags of our status guest plus all cluster resources."""
         resources = cast(list[Json], self.connect().cluster.resources.get())
         for res in resources:
-            if res.get("type") == "lxc" and int(res.get("vmid", -1)) == ctid:
+            if res.get("type") == guest_type and int(res.get("vmid", -1)) == vmid:
                 return res["node"], split_tags(res.get("tags")), resources
-        raise RuntimeError(f"container {ctid} not found in cluster resources")
+        raise RuntimeError(f"{guest_type} {vmid} not found in cluster resources")
 
-    def set_tags(self, node: str, ctid: int, tags: list[str]) -> None:
-        cfg = self.connect().nodes(node).lxc(ctid).config
+    def _config(self, node: str, vmid: int, guest_type: str) -> Any:
+        return getattr(self.connect().nodes(node), guest_type)(vmid).config
+
+    def set_tags(self, node: str, vmid: int, tags: list[str], guest_type: str = "lxc") -> None:
+        cfg = self._config(node, vmid, guest_type)
         if tags:
             cfg.put(tags=";".join(tags))
         else:
             cfg.put(delete="tags")
 
-    def set_description(self, node: str, ctid: int, text: str) -> None:
-        self.connect().nodes(node).lxc(ctid).config.put(description=text)
+    def set_description(self, node: str, vmid: int, text: str, guest_type: str = "lxc") -> None:
+        self._config(node, vmid, guest_type).put(description=text)
 
 
 # --------------------------------------------------------------------------
@@ -296,7 +322,18 @@ class Pve:
 # --------------------------------------------------------------------------
 class Agent:
     def __init__(self, agent_cfg: Json) -> None:
-        self.ctid = int(agent_cfg["ctid"])
+        # vmid of the guest that carries the status: the ProxLB container
+        # itself (guest_type lxc), or an anchor VM when ProxLB runs elsewhere.
+        self.ctid = int(agent_cfg.get("vmid") or agent_cfg.get("ctid") or 0)
+        if not self.ctid:
+            raise ValueError("agent config needs 'vmid' (or 'ctid')")
+        self.guest_type = str(agent_cfg.get("guest_type", "lxc"))
+        if self.guest_type not in ("lxc", "qemu"):
+            raise ValueError("guest_type must be 'lxc' or 'qemu'")
+        self.host = socket.gethostname()
+        self.tls_relax_dir: Optional[str] = None
+        if bool(agent_cfg.get("tls_relax_x509_strict", True)):
+            self.tls_relax_dir = enable_tls_relax()
         self.config_path = Path(agent_cfg.get("proxlb_config", "/etc/proxlb/proxlb.yaml"))
         self.python = agent_cfg.get("python", sys.executable)
         self.poll = int(agent_cfg.get("poll_seconds", 10))
@@ -336,6 +373,8 @@ class Agent:
         self.status["next_run"] = self.next_run
         self.status["hb"] = now_ts()
         self.status["ctid"] = self.ctid
+        self.status["guest_type"] = self.guest_type
+        self.status["host"] = self.host
         self.status["paused"] = self.paused
         text = render_description(self.status)
         # Compare without the heartbeat to avoid needless writes.
@@ -344,7 +383,7 @@ class Agent:
         if not (force or changed or now_ts() - self.last_publish >= HEARTBEAT_SECONDS):
             return
         try:
-            self.pve.set_description(node, self.ctid, text)
+            self.pve.set_description(node, self.ctid, text, self.guest_type)
             self.published_text = text
             self.last_publish = now_ts()
         except Exception as err:  # noqa: BLE001
@@ -369,8 +408,12 @@ class Agent:
             cmd = [self.python, "-m", "proxlb", "-c", tmp_cfg, "-j"]
             if dry_run:
                 cmd.append("-d")
+            env = dict(os.environ)
+            if self.tls_relax_dir:
+                env["PYTHONPATH"] = os.pathsep.join(
+                    p for p in (self.tls_relax_dir, env.get("PYTHONPATH")) if p)
             try:
-                proc = subprocess.run(cmd, capture_output=True, text=True,
+                proc = subprocess.run(cmd, capture_output=True, text=True, env=env,
                                       timeout=self.run_timeout, check=False)
                 stdout, rc = proc.stdout, proc.returncode
                 stderr = proc.stderr
@@ -410,7 +453,7 @@ class Agent:
 
     def tick(self) -> None:
         try:
-            node, tags, resources = self.pve.cluster_state(self.ctid)
+            node, tags, resources = self.pve.cluster_state(self.ctid, self.guest_type)
         except Exception as err:  # noqa: BLE001
             log.error("Proxmox API not usable: %s", err)
             self.pve.reset()
@@ -433,7 +476,8 @@ class Agent:
         if command:
             try:
                 self.pve.set_tags(node, self.ctid,
-                                  [t for t in tags if t not in (TAG_CMD_RUN, TAG_CMD_DRYRUN)])
+                                  [t for t in tags if t not in (TAG_CMD_RUN, TAG_CMD_DRYRUN)],
+                                  self.guest_type)
             except Exception as err:  # noqa: BLE001
                 log.error("could not remove command tag, ignoring command: %s", err)
                 return
@@ -460,8 +504,8 @@ class Agent:
     def loop(self) -> None:
         signal.signal(signal.SIGTERM, self._sigterm)
         signal.signal(signal.SIGINT, self._sigterm)
-        log.info("proxlb-agent %s started for CT %s, schedule every %ss",
-                 AGENT_VERSION, self.ctid, schedule_seconds(self.cfg))
+        log.info("proxlb-agent %s started on %s for %s %s, schedule every %ss",
+                 AGENT_VERSION, self.host, self.guest_type, self.ctid, schedule_seconds(self.cfg))
         while not self.stop:
             self.tick()
             for _ in range(self.poll):

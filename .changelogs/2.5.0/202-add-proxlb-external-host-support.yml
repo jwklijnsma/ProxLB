@@ -1,0 +1,2 @@
+Added:
+  - Connect ProxLB running on another machine to the Proxmox web-interface tab - proxlb-external creates a disk-less, HA-managed anchor VM, an API token and a connection bundle; install-agent.sh sets up proxlb-agent on that machine (guest_type qemu). The agent keeps TLS verification but relaxes only the X.509 strict check that rejects Proxmox CAs without keyUsage (PVE bug #6701).

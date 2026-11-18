@@ -75,9 +75,13 @@ echo "== commands"
 out=$(proxlb-lxc --help)
 grep -q 'Usage: proxlb-lxc' <<<"$out" || fail "proxlb-lxc --help"
 proxlb-gui --help >/dev/null || fail "proxlb-gui --help"
+out=$(proxlb-external --help)
+grep -q 'Usage: proxlb-external' <<<"$out" || fail "proxlb-external --help"
+[ -f /usr/share/proxlb-pve/src/contrib/proxmox/agent/tls-relax/sitecustomize.py ] || fail "tls-relax not packaged"
+[ -x /usr/share/proxlb-pve/src/contrib/proxmox/agent/install-agent.sh ] || fail "install-agent.sh not packaged"
 proxlb-gui --reapply >/dev/null
 [ "$(lines)" = "1" ] || fail "reapply is not idempotent"
-pass "proxlb-lxc and proxlb-gui work"
+pass "proxlb-lxc, proxlb-external and proxlb-gui work"
 
 echo "== the script installer hands over to the package"
 out=$(bash /usr/share/proxlb-pve/src/contrib/proxmox/gui/install-gui.sh)

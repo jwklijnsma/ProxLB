@@ -14,6 +14,9 @@ Description: ProxLB for Proxmox VE - LXC installer and web-interface plugin
  usage, the balance spread and planned or performed migrations, with
  buttons for a dry-run preview, a rebalance and automatic balancing.
  .
+ For ProxLB running on another machine, proxlb-external connects it to
+ the same tab through a small anchor VM.
+ .
  The ProxLB source is bundled, so the container can be created without git
  on the host. A dpkg trigger re-applies the web-interface plugin after
  pve-manager updates. Install this package on every node whose web

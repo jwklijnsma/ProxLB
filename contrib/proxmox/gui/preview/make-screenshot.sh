@@ -13,7 +13,7 @@ python3 - "$PWD/preview.html" "$PWD/../../../../docs/images" <<'PY'
 import os
 import sys
 from playwright.sync_api import sync_playwright
-shots = {"proxlb-gui.png": "", "proxlb-gui-degraded.png": "?degraded"}
+shots = {"proxlb-gui.png": "", "proxlb-gui-degraded.png": "?degraded", "proxlb-gui-external.png": "?external"}
 with sync_playwright() as p:
     browser = p.chromium.launch(executable_path=os.environ.get("CHROME") or None,
                                 args=["--allow-file-access-from-files"])

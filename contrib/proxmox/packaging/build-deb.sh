@@ -57,6 +57,7 @@ git ls-files -co --exclude-standard -- \
 install -D -m 0644 contrib/proxmox/gui/proxlb-gui.js "$SHARE/gui/proxlb-gui.js"
 install -D -m 0755 contrib/proxmox/gui/install-gui.sh "$TREE/usr/sbin/proxlb-gui"
 install -D -m 0755 "$HERE/proxlb-lxc.wrapper" "$TREE/usr/sbin/proxlb-lxc"
+install -D -m 0755 "$HERE/proxlb-external.wrapper" "$TREE/usr/sbin/proxlb-external"
 
 # --- docs --------------------------------------------------------------------
 install -D -m 0644 contrib/proxmox/README.md "$DOC/README.md"
@@ -85,6 +86,8 @@ find "$TREE" -type d -exec chmod 0755 {} +
 find "$TREE" -type f -exec chmod 0644 {} +
 chmod 0755 "$TREE/usr/sbin/"* \
     "$SHARE/src/contrib/proxmox/proxlb-lxc.sh" \
+    "$SHARE/src/contrib/proxmox/proxlb-external.sh" \
+    "$SHARE/src/contrib/proxmox/agent/install-agent.sh" \
     "$SHARE/src/contrib/proxmox/gui/install-gui.sh" \
     "$SHARE/src/contrib/proxmox/agent/proxlb-ctl"
 

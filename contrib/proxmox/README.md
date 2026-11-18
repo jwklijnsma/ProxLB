@@ -33,7 +33,8 @@ No extra ports, reverse proxy, CORS or certificates are needed. The GUI only
 uses the normal Proxmox API with the logged-in user's session.
 
 > **Step-by-step guide:** [GUI-PLUGIN.md](GUI-PLUGIN.md) explains how to add the plugin and connect it
-> to ProxLB, including an existing ProxLB container, user rights and troubleshooting.
+> to ProxLB, including an existing ProxLB container, **ProxLB on another machine**
+> (`proxlb-external` + `install-agent.sh`), user rights and troubleshooting.
 
 ## Install as .deb package (recommended)
 
