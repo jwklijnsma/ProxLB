@@ -10,6 +10,7 @@
   - [RedHat Package](#redhat-package)
   - [Container Images / Docker](#container-images--docker)
     - [Overview of Images](#overview-of-images)
+  - [Proxmox LXC + Web Interface Plugin](#proxmox-lxc--web-interface-plugin)
   - [Source](#source)
     - [Traditional System](#traditional-system)
     - [Container Image](#container-image)
@@ -106,6 +107,16 @@ docker run -it --rm -v $(pwd)/proxlb.yaml:/etc/proxlb/proxlb.yaml proxlb
 ```
 
 *Note: ProxLB container images are officially only available at ghcr.io/credativ/proxlb or docker.io/credativ/proxlb*
+
+### Proxmox LXC + Web Interface Plugin
+ProxLB can run in its own LXC container on the cluster, with a **ProxLB** tab in the Proxmox web interface (*Datacenter → ProxLB*). The tab shows node usage, the balance spread and planned or performed migrations, and has buttons for a dry-run preview, a rebalance and automatic balancing. Run this as root on one Proxmox VE node:
+
+```bash
+git clone https://github.com/jwklijnsma/ProxLB.git
+bash ProxLB/contrib/proxmox/proxlb-lxc.sh            # see --help for IP, storage, schedule, ...
+```
+
+Scheduled runs only preview (dry-run) until you switch on automatic balancing in the GUI. See [contrib/proxmox/README.md](../contrib/proxmox/README.md) for details.
 
 ### Source
 ProxLB can also easily be used from the provided sources - for traditional systems but also as a Docker/Podman container image.
