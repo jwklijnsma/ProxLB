@@ -236,6 +236,8 @@ git clone https://github.com/jwklijnsma/ProxLB.git
 bash ProxLB/contrib/proxmox/proxlb-lxc.sh            # see --help for IP, storage, schedule, ...
 ```
 
+![ProxLB tab in the Proxmox web interface](docs/images/proxlb-gui.png)
+
 Scheduled runs only preview (dry-run) until you switch on automatic balancing in the GUI. See [contrib/proxmox/README.md](contrib/proxmox/README.md) for details.
 
 ### Source

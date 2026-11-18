@@ -5,6 +5,10 @@ adds a **ProxLB** tab to the Proxmox web interface (*Datacenter → ProxLB*), so
 you can see at a glance how balanced the cluster is and what ProxLB plans to
 do or has done.
 
+![ProxLB tab in the Proxmox web interface](../../docs/images/proxlb-gui.png)
+
+*Rendered from the real plugin code with sample data (`gui/preview/make-screenshot.sh`).*
+
 ```
 ┌──────────── Proxmox VE web interface (any node) ────────────┐
 │ Datacenter → ProxLB                                         │
