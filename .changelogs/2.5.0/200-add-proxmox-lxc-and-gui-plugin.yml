@@ -1,2 +1,3 @@
 Added:
   - Add `contrib/proxmox/proxlb-lxc.sh` to deploy ProxLB in an LXC container with a least-privilege API token, plus `proxlb-agent` and a ProxLB tab in the Proxmox web interface (Datacenter -> ProxLB) to preview, run and monitor balancing.
+  - The ProxLB LXC is made highly available with Proxmox HA (shared storage, or ZFS replication); proxlb-agent pauses real balancing while the cluster is degraded (node offline, HA recovering guests).

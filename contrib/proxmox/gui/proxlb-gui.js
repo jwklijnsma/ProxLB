@@ -14,14 +14,15 @@
  */
 /* global Ext, Proxmox, PVE, gettext */
 (function() {
-    'use strict';
+    // NOTE: no 'use strict' here - ExtJS callParent() relies on fn.caller,
+    // which strict mode forbids (it would break the whole Datacenter panel).
 
     if (typeof Ext === 'undefined' || typeof PVE === 'undefined' || !PVE.panel || !PVE.dc) {
         return; // not the PVE desktop UI (e.g. mobile UI)
     }
 
     const PLB = {
-        VERSION: '1.0.0',
+        VERSION: '1.1.0',
         TAG_CT: 'proxlb',
         TAG_ACTIVE: 'proxlb-active',
         TAG_CMD_DRYRUN: 'proxlb-cmd-dryrun',
@@ -92,7 +93,7 @@
 
         badge: function(text, color) {
             return '<span style="display:inline-block;padding:1px 7px;border-radius:9px;color:#fff;' +
-                'background:' + color + ';font-size:11px;font-weight:600">' + Ext.htmlEncode(text) + '</span>';
+                'background:' + color + ';font-size:11px;font-weight:600;line-height:16px;vertical-align:middle">' + Ext.htmlEncode(text) + '</span>';
         },
     };
     PVE.ProxLB = PLB;
@@ -199,7 +200,7 @@
                             renderer: (v) => PLB.bar(v) },
                         { header: gettext('Memory') + ' (live)', dataIndex: 'mem', flex: 1,
                             renderer: (v) => PLB.bar(v) },
-                        { header: gettext('Memory') + ' @ ' + gettext('last run'), dataIndex: 'lastMem', width: 130,
+                        { header: gettext('Memory') + ' @ ' + gettext('last run'), dataIndex: 'lastMem', width: 160,
                             renderer: (v) => v === null || v === undefined ? '-' : v.toFixed(1) + ' %' },
                         { header: gettext('Guests'), dataIndex: 'guests', width: 80, align: 'right' },
                         { header: gettext('Moves out / in'), width: 120, align: 'center',
@@ -386,9 +387,19 @@
             } else {
                 let ctState = ctRunning ? PLB.badge(gettext('running'), '#5cb85c')
                     : PLB.badge(ct.status || 'unknown', '#d9534f');
+                let haState = ct.hastate
+                    ? PLB.badge('HA: ' + ct.hastate, ct.hastate === 'started' ? '#5cb85c' : '#f0ad4e')
+                    : PLB.badge(gettext('HA: off'), '#777');
                 lines.push('<b>' + gettext('Container') + ':</b> CT ' + ct.vmid + ' (' +
                     Ext.htmlEncode(ct.name || '') + ') on ' + Ext.htmlEncode(ct.node) + ' ' + ctState +
-                    (stale ? ' ' + PLB.badge(gettext('agent not responding'), '#d9534f') : ''));
+                    ' ' + haState +
+                    (stale ? ' ' + PLB.badge(gettext('agent not responding'), '#d9534f') : '') +
+                    (!ct.hastate ? ' <span style="opacity:0.7">' +
+                        gettext('(survive a node failure: proxlb-lxc.sh --enable-ha') + ' ' + ct.vmid + ')</span>' : ''));
+                lines.push('<b>' + gettext('Cluster') + ':</b> ' + (st.paused
+                    ? PLB.badge(gettext('degraded'), '#d9534f') + ' ' +
+                      gettext('real balancing paused until the cluster is healthy') + ' - ' + Ext.htmlEncode(st.paused)
+                    : PLB.badge(gettext('healthy'), '#5cb85c')));
 
                 let result;
                 if (running) {
@@ -432,7 +443,8 @@
             // ---- buttons -----------------------------------------------------
             let canAct = !!ct && ctRunning && !running && !queued;
             me.btnPreview.setDisabled(!canAct);
-            me.btnRun.setDisabled(!canAct);
+            me.btnRun.setDisabled(!canAct || !!st.paused);
+            me.btnRun.setTooltip(st.paused ? gettext('Paused: the cluster is degraded') : '');
             me.btnAuto.setDisabled(!ct);
             me.btnCt.setDisabled(!ct);
             me.btnAuto.setIconCls(auto ? 'fa fa-toggle-on' : 'fa fa-toggle-off');

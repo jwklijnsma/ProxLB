@@ -16,6 +16,10 @@ How it works
     proxlb-cmd-run      run a real balancing now
     proxlb-active       scheduled runs balance for real (otherwise dry-run)
   The agent removes the ``proxlb-cmd-*`` tags when it picks them up.
+* High availability: the container itself is made HA by Proxmox
+  (ha-manager, see proxlb-lxc.sh --ha). The agent talks to any reachable
+  cluster node and pauses real balancing while the cluster is degraded
+  (a node offline or HA recovering guests), so it never fights HA recovery.
 * Local triggers also work: ``touch /var/lib/proxlb/trigger-dryrun`` or
   ``/var/lib/proxlb/trigger-run`` (see ``proxlb-ctl``).
 """
@@ -38,7 +42,7 @@ import yaml
 
 Json = dict[str, Any]
 
-AGENT_VERSION = "1.0.0"
+AGENT_VERSION = "1.1.0"
 STATUS_MARKER = "<!--proxlb-status:"
 TAG_CMD_DRYRUN = "proxlb-cmd-dryrun"
 TAG_CMD_RUN = "proxlb-cmd-run"
@@ -96,6 +100,24 @@ def extract_json(stdout: str) -> tuple[Optional[Json], list[str]]:
             rest = text[end:].splitlines()
             return data, lines[:idx] + rest
     return None, lines
+
+
+HA_FAILURE_STATES = ("fence", "recovery", "error")
+
+
+def cluster_degraded(resources: list[Json], ignore_nodes: list[str]) -> Optional[str]:
+    """Return why the cluster is degraded, or None when it is healthy."""
+    reasons = []
+    offline = sorted(r["node"] for r in resources
+                     if r.get("type") == "node" and r.get("status") != "online"
+                     and r.get("node") not in ignore_nodes)
+    if offline:
+        reasons.append(f"node(s) offline: {', '.join(offline)}")
+    recovering = [str(r.get("vmid")) for r in resources
+                  if r.get("type") in ("qemu", "lxc") and r.get("hastate") in HA_FAILURE_STATES]
+    if recovering:
+        reasons.append(f"HA is recovering {len(recovering)} guest(s)")
+    return "; ".join(reasons) or None
 
 
 def build_status(data: Optional[Json], log_lines: list[str], *, dry_run: bool,
@@ -181,6 +203,7 @@ def render_description(status: Json) -> str:
             f"| Last run | {fmt_time(st.get('finished') or st.get('started'))} ({mode}, {st.get('trigger', '-')}) |",
             f"| Result | {result} |",
             f"| Automatic balancing | {auto} |",
+            f"| Cluster | {'degraded - balancing paused: ' + st['paused'] if st.get('paused') else 'healthy'} |",
             f"| Next scheduled run | {fmt_time(st.get('next_run'))} |",
             f"| Method | {st.get('method')} / {st.get('mode')} (balanciness {st.get('balanciness')}) |",
             "",
@@ -249,11 +272,12 @@ class Pve:
     def reset(self) -> None:
         self.api = None
 
-    def find_ct(self, ctid: int) -> tuple[str, list[str]]:
-        api = self.connect()
-        for res in api.cluster.resources.get(type="vm"):
-            if res.get("type") == "lxc" and int(res.get("vmid")) == ctid:
-                return res["node"], split_tags(res.get("tags"))
+    def cluster_state(self, ctid: int) -> tuple[str, list[str], list[Json]]:
+        """Node and tags of our container plus all cluster resources."""
+        resources = cast(list[Json], self.connect().cluster.resources.get())
+        for res in resources:
+            if res.get("type") == "lxc" and int(res.get("vmid", -1)) == ctid:
+                return res["node"], split_tags(res.get("tags")), resources
         raise RuntimeError(f"container {ctid} not found in cluster resources")
 
     def set_tags(self, node: str, ctid: int, tags: list[str]) -> None:
@@ -278,6 +302,8 @@ class Agent:
         self.poll = int(agent_cfg.get("poll_seconds", 10))
         self.run_timeout = int(agent_cfg.get("run_timeout_seconds", 4 * 3600))
         self.state_dir = Path(agent_cfg.get("state_dir", "/var/lib/proxlb"))
+        self.pause_when_degraded = bool(agent_cfg.get("pause_when_degraded", True))
+        self.paused: Optional[str] = None
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.cfg = self.load_cfg()
         self.pve = Pve(self.cfg)
@@ -310,6 +336,7 @@ class Agent:
         self.status["next_run"] = self.next_run
         self.status["hb"] = now_ts()
         self.status["ctid"] = self.ctid
+        self.status["paused"] = self.paused
         text = render_description(self.status)
         # Compare without the heartbeat to avoid needless writes.
         body = text.split(STATUS_MARKER)[0]
@@ -327,6 +354,9 @@ class Agent:
     # -- running ProxLB -----------------------------------------------------
     def run_proxlb(self, dry_run: bool, trigger: str, node: str, auto: bool) -> None:
         self.cfg = self.load_cfg()
+        if not dry_run and self.paused:
+            log.warning("cluster degraded (%s) - running a dry-run instead of balancing", self.paused)
+            dry_run = True
         started = now_ts()
         self.status.update(state="running", started=started, dry_run=dry_run, trigger=trigger)
         self.publish(node, auto, force=True)
@@ -362,6 +392,7 @@ class Agent:
 
         self.status = build_status(data, log_lines, dry_run=dry_run, trigger=trigger,
                                    started=started, finished=now_ts(), rc=rc, cfg=self.cfg)
+        self.status["paused"] = self.paused
         self.save_status()
         log.info("ProxLB run finished: ok=%s moves=%s", self.status["ok"], self.status["moves_total"])
 
@@ -379,12 +410,20 @@ class Agent:
 
     def tick(self) -> None:
         try:
-            node, tags = self.pve.find_ct(self.ctid)
+            node, tags, resources = self.pve.cluster_state(self.ctid)
         except Exception as err:  # noqa: BLE001
             log.error("Proxmox API not usable: %s", err)
             self.pve.reset()
             return
         auto = TAG_ACTIVE in tags
+        ignore = list((self.cfg.get("proxmox_cluster") or {}).get("ignore_nodes") or [])
+        paused = cluster_degraded(resources, ignore) if self.pause_when_degraded else None
+        if paused != self.paused:
+            if paused:
+                log.warning("cluster degraded, real balancing paused: %s", paused)
+            else:
+                log.info("cluster healthy again, balancing resumed")
+        self.paused = paused
 
         command = None
         if TAG_CMD_RUN in tags:

@@ -1,9 +1,15 @@
 # ProxLB as an LXC container + Proxmox web-interface plugin
 
+[![Proxmox LXC + GUI plugin](https://github.com/jwklijnsma/ProxLB/actions/workflows/15-contrib-proxmox.yml/badge.svg)](https://github.com/jwklijnsma/ProxLB/actions/workflows/15-contrib-proxmox.yml)
+
 This directory deploys ProxLB in its own **LXC container** on Proxmox VE and
 adds a **ProxLB** tab to the Proxmox web interface (*Datacenter → ProxLB*), so
 you can see at a glance how balanced the cluster is and what ProxLB plans to
 do or has done.
+
+![ProxLB tab in the Proxmox web interface](../../docs/images/proxlb-gui.png)
+
+*Rendered from the real plugin code with sample data (`gui/preview/make-screenshot.sh`).*
 
 ```
 ┌──────────── Proxmox VE web interface (any node) ────────────┐
@@ -51,7 +57,8 @@ The script:
 3. installs ProxLB and `proxlb-agent` in `/opt/proxlb/venv`,
 4. writes `/etc/proxlb/proxlb.yaml` with every cluster node as API host and the
    cluster CA as trusted CA, so TLS verification stays on,
-5. installs the GUI plugin on **all** cluster nodes over the cluster's root SSH.
+5. installs the GUI plugin on **all** cluster nodes over the cluster's root SSH,
+6. makes the container HA when the storage allows it (see below).
 
 Useful options (`bash proxlb-lxc.sh --help` lists them all):
 
@@ -66,6 +73,7 @@ Useful options (`bash proxlb-lxc.sh --help` lists them all):
 | `--active` | off | balance for real on schedule right away |
 | `--no-gui` / `--gui-this-node-only` | | GUI plugin installation |
 | `--upgrade CTID` | | update ProxLB, agent and GUI of an existing CT |
+| `--ha` / `--no-ha` / `--enable-ha CTID` | auto | high availability, see below |
 
 ## Safe by default
 
@@ -73,6 +81,38 @@ Scheduled runs are **dry-runs** (preview only) until you switch on
 **Automatic balancing** in the GUI, or install with `--active`. The first run
 after the agent starts is always a dry-run, so a reboot never triggers
 migrations on its own. **Rebalance now** always asks for confirmation.
+
+## High availability (a node goes down, ProxLB keeps working)
+
+By default the installer makes the ProxLB container **highly available** with
+Proxmox HA (`ha-manager add ct:<CTID>`). When the node it runs on fails, Proxmox
+fences that node and starts the container on another node. The agent there
+starts again and connects to any cluster node that is still reachable.
+
+| Container storage | What the installer does |
+|---|---|
+| Shared (Ceph RBD/CephFS, NFS, CIFS, iSCSI, shared LVM, ...) | HA only, no data loss |
+| Local **ZFS** (`local-zfs`) | storage replication to every other node (every 5 min, `--repl-schedule`) + HA. The CT restarts from the last replica, so at most a few minutes of agent state are lost. |
+| Other local storage (`local-lvm`, dir) | not possible. Move the disk first: `pct move-volume <CTID> rootfs <shared-storage>`, then run `bash proxlb-lxc.sh --enable-ha <CTID>` |
+
+* For an existing install: `bash proxlb-lxc.sh --enable-ha <CTID>` (works from any node).
+* `--no-ha` skips it. `--ha` warns loudly when it is not possible.
+* HA needs quorum. In a **2-node cluster** the surviving node has no quorum and
+  HA cannot act, so add a QDevice first (`pvecm qdevice setup <ip>`).
+
+**Balancing pauses while the cluster is degraded.** When a node is offline
+(and not in `ignore_nodes`), or HA is fencing or recovering guests, the agent
+turns every real run, scheduled or *Rebalance now*, into a dry-run. That way
+ProxLB never fights HA recovery or piles guests onto the survivors. It resumes
+automatically when the cluster is healthy again. To turn this off, set
+`pause_when_degraded: false` in `/etc/proxlb/agent.yaml`.
+
+![ProxLB tab while a node is down](../../docs/images/proxlb-gui-degraded.png)
+
+*Node pve1 has failed: HA restarted its guests elsewhere and ProxLB pauses balancing (sample data).*
+
+The GUI plugin is installed on every node, so the tab keeps working from any
+surviving node's web interface.
 
 ## Using the GUI
 
@@ -120,6 +160,19 @@ The plugin is `/usr/share/pve-manager/js/proxlb-gui.js`, loaded by one line in
 `/usr/share/pve-manager/index.html.tpl`. A `pve-manager` update overwrites that
 template, so an apt hook (`/etc/apt/apt.conf.d/99proxlb-gui`) adds the line back
 automatically.
+
+## Development / CI
+
+GitHub Actions (`.github/workflows/15-contrib-proxmox.yml`) runs on every change under `contrib/proxmox/`:
+
+* **shellcheck** for the installer, GUI installer and `proxlb-ctl`,
+* **agent tests** on Python 3.11 and 3.13 (Debian 12 / 13 containers),
+* **GUI tests** (`node --test contrib/proxmox/gui/tests/plugin.test.js`), plus a render on real
+  ExtJS that fails on any page error. The screenshots are uploaded as an artifact,
+* an **installer bundle** (`proxlb-proxmox.tar.gz`) as an artifact, ready to copy to a node.
+
+Locally: `node --test contrib/proxmox/gui/tests/plugin.test.js` and
+`pytest tests/test_contrib_proxmox_agent.py`.
 
 ## Notes
 
