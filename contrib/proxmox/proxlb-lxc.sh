@@ -57,9 +57,12 @@ ENABLE_HA=""
 REPL_SCHEDULE="*/5"
 PVE_USER="proxlb@pve"
 
+# how to call this script again (the proxlb-pve package sets PROXLB_LXC_CMD)
+CMD="${PROXLB_LXC_CMD:-bash $0}"
+
 usage() {
     cat <<EOF
-Usage: $0 [options]
+Usage: $CMD [options]
 
 Container
   --ctid ID              container ID (default: next free ID)
@@ -268,7 +271,7 @@ setup_ha() {
     else
         if [ "$HA" = "yes" ]; then
             warn "storage $rootfs ($stype) is local and not ZFS - another node cannot start this CT."
-            warn "move it first, e.g.: pct move-volume $CTID rootfs <shared-storage>, then: $0 --enable-ha $CTID"
+            warn "move it first, e.g.: pct move-volume $CTID rootfs <shared-storage>, then: $CMD --enable-ha $CTID"
         else
             info "storage $rootfs is local - HA skipped (use shared storage or ZFS, then --enable-ha $CTID)"
         fi
@@ -515,6 +518,6 @@ ${C_G}ProxLB is installed.${C_0}
 
   Web interface     reload the page (Ctrl+F5) and open  Datacenter -> ProxLB
   In the container  pct enter $CTID   then   proxlb-ctl {dryrun|run|status|logs|config}
-  Upgrade later     bash $0 --upgrade $CTID
+  Upgrade later     $CMD --upgrade $CTID
 
 EOF

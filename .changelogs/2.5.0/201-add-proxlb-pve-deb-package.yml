@@ -1,0 +1,2 @@
+Added:
+  - Add the proxlb-pve Debian package for Proxmox VE hosts (proxlb-lxc installer with bundled ProxLB source, web-interface plugin re-applied by a dpkg trigger after pve-manager updates), built, lintian-checked and install-tested on Debian bookworm/trixie by GitHub Actions, published as nightly pre-release and on v* tags.
