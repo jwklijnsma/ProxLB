@@ -1,5 +1,7 @@
 # ProxLB as an LXC container + Proxmox web-interface plugin
 
+[![Proxmox LXC + GUI plugin](https://github.com/jwklijnsma/ProxLB/actions/workflows/15-contrib-proxmox.yml/badge.svg)](https://github.com/jwklijnsma/ProxLB/actions/workflows/15-contrib-proxmox.yml)
+
 This directory deploys ProxLB in its own **LXC container** on Proxmox VE and
 adds a **ProxLB** tab to the Proxmox web interface (*Datacenter → ProxLB*), so
 you can see at a glance how balanced the cluster is and what ProxLB plans to
@@ -158,6 +160,19 @@ The plugin is `/usr/share/pve-manager/js/proxlb-gui.js`, loaded by one line in
 `/usr/share/pve-manager/index.html.tpl`. A `pve-manager` update overwrites that
 template, so an apt hook (`/etc/apt/apt.conf.d/99proxlb-gui`) adds the line back
 automatically.
+
+## Development / CI
+
+GitHub Actions (`.github/workflows/15-contrib-proxmox.yml`) runs on every change under `contrib/proxmox/`:
+
+* **shellcheck** for the installer, GUI installer and `proxlb-ctl`,
+* **agent tests** on Python 3.11 and 3.13 (Debian 12 / 13 containers),
+* **GUI tests** (`node --test contrib/proxmox/gui/tests/plugin.test.js`), plus a render on real
+  ExtJS that fails on any page error. The screenshots are uploaded as an artifact,
+* an **installer bundle** (`proxlb-proxmox.tar.gz`) as an artifact, ready to copy to a node.
+
+Locally: `node --test contrib/proxmox/gui/tests/plugin.test.js` and
+`pytest tests/test_contrib_proxmox_agent.py`.
 
 ## Notes
 
