@@ -6,9 +6,11 @@
  *   - the last ProxLB run (planned or performed migrations),
  *   - buttons for a dry-run preview, a real rebalance and automatic balancing.
  *
- * The data comes from the Notes of the ProxLB container (written by
+ * The data comes from the Notes of the guest tagged "proxlb" (written by
  * proxlb-agent) and from /cluster/resources, using the logged-in user's
- * own session. Commands are sent by adding tags to that container.
+ * own session. Commands are sent by adding tags to that guest. The guest is
+ * the ProxLB container itself, or - when ProxLB runs on another machine -
+ * a small "anchor" VM without disks (see proxlb-external.sh).
  *
  * Installed by contrib/proxmox/gui/install-gui.sh. License: GPL-3.0
  */
@@ -22,7 +24,7 @@
     }
 
     const PLB = {
-        VERSION: '1.1.0',
+        VERSION: '1.2.0',
         TAG_CT: 'proxlb',
         TAG_ACTIVE: 'proxlb-active',
         TAG_CMD_DRYRUN: 'proxlb-cmd-dryrun',
@@ -161,7 +163,7 @@
                 handler: function() {
                     let tree = Ext.ComponentQuery.query('pveResourceTree')[0];
                     if (tree && me.ct) {
-                        tree.selectById('lxc/' + me.ct.vmid);
+                        tree.selectById(me.ct.type + '/' + me.ct.vmid);
                     }
                 },
             });
@@ -270,7 +272,7 @@
                 method: 'GET',
                 success: function(response) {
                     me.resources = response.result.data || [];
-                    let cts = me.resources.filter((r) => r.type === 'lxc' &&
+                    let cts = me.resources.filter((r) => (r.type === 'lxc' || r.type === 'qemu') &&
                         PLB.splitTags(r.tags).indexOf(PLB.TAG_CT) !== -1);
                     cts.sort((a, b) => a.vmid - b.vmid);
                     me.ct = cts.length ? cts[0] : null;
@@ -283,7 +285,7 @@
                     }
                     me.ctTags = PLB.splitTags(me.ct.tags);
                     Proxmox.Utils.API2Request({
-                        url: '/nodes/' + me.ct.node + '/lxc/' + me.ct.vmid + '/config',
+                        url: '/nodes/' + me.ct.node + '/' + me.ct.type + '/' + me.ct.vmid + '/config',
                         method: 'GET',
                         success: function(resp) {
                             me.loading = false;
@@ -318,6 +320,9 @@
             // no heartbeat is written while a (long) balancing run is in progress
             let stale = !running && st.hb && (Date.now() / 1000 - st.hb) > PLB.STALE_SECONDS;
             let ctRunning = ct && ct.status === 'running';
+            // ProxLB on another machine: the guest is an anchor VM that never runs
+            let external = !!ct && ct.type === 'qemu';
+            let agentAlive = running || (!!st.hb && (Date.now() / 1000 - st.hb) <= PLB.STALE_SECONDS);
 
             // ---- nodes -------------------------------------------------------
             let method = st.method || 'memory';
@@ -382,20 +387,35 @@
             }
             if (!ct) {
                 lines.push(PLB.badge(gettext('not installed'), '#777') + ' ' +
-                    gettext('No container with the tag') + ' <code>proxlb</code> ' + gettext('found.') + ' ' +
-                    gettext('Create one on a node with') + ' <code>proxlb-lxc.sh</code>.');
+                    gettext('No container or VM with the tag') + ' <code>proxlb</code> ' + gettext('found.') + ' ' +
+                    gettext('Create a ProxLB container with') + ' <code>proxlb-lxc</code>, ' +
+                    gettext('or connect ProxLB on another machine with') + ' <code>proxlb-external</code>.');
             } else {
-                let ctState = ctRunning ? PLB.badge(gettext('running'), '#5cb85c')
-                    : PLB.badge(ct.status || 'unknown', '#d9534f');
+                let haOk = ct.hastate === 'started' || (external && ct.hastate === 'stopped');
                 let haState = ct.hastate
-                    ? PLB.badge('HA: ' + ct.hastate, ct.hastate === 'started' ? '#5cb85c' : '#f0ad4e')
+                    ? PLB.badge('HA: ' + ct.hastate, haOk ? '#5cb85c' : '#f0ad4e')
                     : PLB.badge(gettext('HA: off'), '#777');
-                lines.push('<b>' + gettext('Container') + ':</b> CT ' + ct.vmid + ' (' +
-                    Ext.htmlEncode(ct.name || '') + ') on ' + Ext.htmlEncode(ct.node) + ' ' + ctState +
-                    ' ' + haState +
-                    (stale ? ' ' + PLB.badge(gettext('agent not responding'), '#d9534f') : '') +
-                    (!ct.hastate ? ' <span style="opacity:0.7">' +
-                        gettext('(survive a node failure: proxlb-lxc.sh --enable-ha') + ' ' + ct.vmid + ')</span>' : ''));
+                let haHint = external
+                    ? 'ha-manager add vm:' + ct.vmid + ' --state stopped'
+                    : 'proxlb-lxc --enable-ha ' + ct.vmid;
+                let agentState = stale ? PLB.badge(gettext('agent not responding'), '#d9534f')
+                    : !st.hb ? PLB.badge(gettext('waiting for agent'), '#f0ad4e') : '';
+                if (external) {
+                    lines.push('<b>ProxLB:</b> ' + gettext('runs on') + ' <b>' +
+                        Ext.htmlEncode(st.host || '?') + '</b> ' + PLB.badge(gettext('external'), '#337ab7') +
+                        ' ' + agentState + ' &middot; ' + gettext('status via anchor VM') + ' ' + ct.vmid +
+                        ' (' + Ext.htmlEncode(ct.name || '') + ') on ' + Ext.htmlEncode(ct.node) + ' ' + haState);
+                } else {
+                    let ctState = ctRunning ? PLB.badge(gettext('running'), '#5cb85c')
+                        : PLB.badge(ct.status || 'unknown', '#d9534f');
+                    lines.push('<b>' + gettext('Container') + ':</b> CT ' + ct.vmid + ' (' +
+                        Ext.htmlEncode(ct.name || '') + ') on ' + Ext.htmlEncode(ct.node) + ' ' + ctState +
+                        ' ' + haState + (agentState ? ' ' + agentState : ''));
+                }
+                if (!ct.hastate) {
+                    lines[lines.length - 1] += ' <span style="opacity:0.7">(' +
+                        gettext('survive a node failure:') + ' <code>' + haHint + '</code>)</span>';
+                }
                 lines.push('<b>' + gettext('Cluster') + ':</b> ' + (st.paused
                     ? PLB.badge(gettext('degraded'), '#d9534f') + ' ' +
                       gettext('real balancing paused until the cluster is healthy') + ' - ' + Ext.htmlEncode(st.paused)
@@ -441,12 +461,13 @@
             me.summary.setHtml(lines.join('<br>'));
 
             // ---- buttons -----------------------------------------------------
-            let canAct = !!ct && ctRunning && !running && !queued;
+            let canAct = !!ct && agentAlive && (external || ctRunning) && !running && !queued;
             me.btnPreview.setDisabled(!canAct);
             me.btnRun.setDisabled(!canAct || !!st.paused);
             me.btnRun.setTooltip(st.paused ? gettext('Paused: the cluster is degraded') : '');
             me.btnAuto.setDisabled(!ct);
             me.btnCt.setDisabled(!ct);
+            me.btnCt.setText(external ? gettext('Open anchor VM') : gettext('Open container'));
             me.btnAuto.setIconCls(auto ? 'fa fa-toggle-on' : 'fa fa-toggle-off');
             me.btnAuto.setText(gettext('Automatic balancing') + ': ' + (auto ? gettext('on') : gettext('off')));
         },
@@ -457,7 +478,7 @@
             if (!ct) {
                 return;
             }
-            let url = '/nodes/' + ct.node + '/lxc/' + ct.vmid + '/config';
+            let url = '/nodes/' + ct.node + '/' + ct.type + '/' + ct.vmid + '/config';
             Proxmox.Utils.API2Request({
                 url: url,
                 method: 'GET',

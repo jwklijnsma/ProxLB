@@ -16,6 +16,7 @@ case "$1" in
                   cd /opt/proxlb/src && git pull --ff-only \
                     && /opt/proxlb/venv/bin/pip install --no-cache-dir --upgrade /opt/proxlb/src \
                     && install -m 0755 contrib/proxmox/agent/proxlb-agent.py /opt/proxlb/agent/proxlb-agent.py \
+                    && install -D -m 0644 contrib/proxmox/agent/tls-relax/sitecustomize.py /opt/proxlb/agent/tls-relax/sitecustomize.py \
                     && systemctl restart proxlb-agent && echo "ProxLB updated." ;;
   *) echo "usage: proxlb-ctl {dryrun|run|status|last|logs|config|restart|update}"; exit 1 ;;
 esac

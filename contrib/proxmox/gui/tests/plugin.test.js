@@ -132,6 +132,40 @@ test('buttons send commands as container tags', () => {
     assert.strictEqual(calls[1].params.digest, 'd1');
 });
 
+test('ProxLB on another machine: anchor VM (stopped) with a live agent', () => {
+    const { classes, calls } = loadPlugin();
+    const anchor = { type: 'qemu', vmid: 9000, node: 'pve2', status: 'stopped', name: 'proxlb-anchor', hastate: 'stopped' };
+    const me = makeView(classes, { ct: anchor, status: statusJson({ host: 'mgmt01', guest_type: 'qemu' }) });
+    me.render_();
+    const s = text(me.summary.html);
+    assert.match(s, /runs on mgmt01/);
+    assert.match(s, /external/);
+    assert.match(s, /anchor VM 9000/);
+    assert.match(s, /HA: stopped/);
+    assert.doesNotMatch(s, /agent not responding|waiting for agent/);
+    assert.strictEqual(me.btnPreview.disabled, false); // stopped VM is fine, agent is alive
+    assert.strictEqual(me.btnCt.text, 'Open anchor VM');
+
+    me.reload = () => {};
+    me.sendCommand('proxlb-cmd-run');
+    assert.strictEqual(calls[0].url, '/nodes/pve2/qemu/9000/config');
+});
+
+test('buttons need a live agent', () => {
+    const { classes } = loadPlugin();
+    const anchor = { type: 'qemu', vmid: 9000, node: 'pve2', status: 'stopped', name: 'a' };
+    const stale = makeView(classes, { ct: anchor, status: statusJson({ host: 'mgmt01', hb: now() - 3600 }) });
+    stale.render_();
+    assert.match(text(stale.summary.html), /agent not responding/);
+    assert.match(text(stale.summary.html), /ha-manager add vm:9000/);
+    assert.strictEqual(stale.btnPreview.disabled, true);
+
+    const fresh = makeView(classes, { status: {} }); // container running, agent never reported
+    fresh.render_();
+    assert.match(text(fresh.summary.html), /waiting for agent/);
+    assert.strictEqual(fresh.btnPreview.disabled, true);
+});
+
 test('plugin source is not strict mode (ExtJS callParent needs fn.caller)', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'proxlb-gui.js'), 'utf8');
     assert.ok(!/^\s*['"]use strict['"]/m.test(src));

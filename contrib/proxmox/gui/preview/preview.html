@@ -58,6 +58,13 @@ if (degraded) {
   resources.push({ type: 'qemu', vmid: 112, node: 'pve2', status: 'running', hastate: 'recovery' });
 }
 const ctTags = 'proxlb;plb_ignore_vm;proxlb-active';
+// ?external : ProxLB runs on another machine, status via an anchor VM
+if (location.search.indexOf('external') !== -1) {
+  const i = resources.findIndex((r) => r.vmid === 120);
+  resources[i] = { type: 'qemu', vmid: 9000, node: 'pve3', name: 'proxlb-anchor', status: 'stopped',
+    hastate: 'stopped', tags: ctTags };
+  Object.assign(status, { host: 'mgmt01.lan', guest_type: 'qemu', ctid: 9000 });
+}
 const guestsPerNode = location.search.indexOf('degraded') !== -1 ? { pve1: 0, pve2: 15, pve3: 11 } : { pve1: 12, pve2: 8, pve3: 6 };
 Object.keys(guestsPerNode).forEach((n) => {
   for (let i = 0; i < guestsPerNode[n]; i++) {
@@ -69,7 +76,7 @@ window.Proxmox = { Utils: { API2Request: function(opts) {
   setTimeout(() => {
     if (opts.url === '/cluster/resources') {
       opts.success({ result: { data: resources } });
-    } else if (/\/lxc\/120\/config$/.test(opts.url)) {
+    } else if (/\/config$/.test(opts.url)) {
       opts.success({ result: { data: {
         tags: ctTags, digest: 'x',
         description: 'ProxLB\n<!--proxlb-status:' + JSON.stringify(status) + '-->',

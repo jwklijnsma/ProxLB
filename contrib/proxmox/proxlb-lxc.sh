@@ -192,6 +192,7 @@ install_software() {
     ctsh "install -d -o plb -g plb -m 0750 /var/lib/proxlb /var/log/proxlb /var/log/proxlb/solver
           install -d -m 0755 /opt/proxlb/agent
           install -m 0755 /opt/proxlb/src/contrib/proxmox/agent/proxlb-agent.py /opt/proxlb/agent/proxlb-agent.py
+          install -D -m 0644 /opt/proxlb/src/contrib/proxmox/agent/tls-relax/sitecustomize.py /opt/proxlb/agent/tls-relax/sitecustomize.py
           install -m 0755 /opt/proxlb/src/contrib/proxmox/agent/proxlb-ctl /usr/local/bin/proxlb-ctl
           install -m 0644 /opt/proxlb/src/contrib/proxmox/agent/proxlb-agent.service /etc/systemd/system/proxlb-agent.service
           systemctl daemon-reload"
@@ -417,7 +418,9 @@ install_software
 # ------------------------------------------------------------------ config ---
 SSL_VERIFY=True
 FIRST_HOST=$(echo "$API_HOSTS" | cut -d"'" -f2)
-if ! ct /opt/proxlb/venv/bin/python -c "
+# chain + hostname are verified; only the RFC 5280 strict checks are relaxed
+# (Proxmox CAs before pve-cluster 9.1.2 lack keyUsage, PVE bug #6701)
+if ! ct env PYTHONPATH=/opt/proxlb/agent/tls-relax /opt/proxlb/venv/bin/python -c "
 import requests, sys
 host = sys.argv[1]
 url = 'https://[%s]:8006/api2/json/version' % host if ':' in host else 'https://%s:8006/api2/json/version' % host

@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, Optional
 from unittest.mock import MagicMock
 
 AGENT_PATH = Path(__file__).resolve().parent.parent / "contrib" / "proxmox" / "agent" / "proxlb-agent.py"
@@ -158,7 +158,7 @@ class TestClusterDegraded(unittest.TestCase):
 
 
 class TestAgentLoop(unittest.TestCase):
-    def make_agent(self, tmp: str, tags: list[str]) -> Any:
+    def make_agent(self, tmp: str, tags: list[str], extra: Optional[dict[str, Any]] = None) -> Any:
         cfg_path = Path(tmp) / "proxlb.yaml"
         cfg_path.write_text(json.dumps(CFG))  # JSON is valid YAML
         fake_proxlb = Path(tmp) / "fake_python"
@@ -170,7 +170,7 @@ class TestAgentLoop(unittest.TestCase):
         fake_proxlb.chmod(0o755)
         (Path(tmp) / "out.json").write_text(json.dumps(PROXLB_DATA, indent=4))
         a = agent.Agent({"ctid": 120, "proxlb_config": str(cfg_path),
-                         "python": str(fake_proxlb), "state_dir": tmp})
+                         "python": str(fake_proxlb), "state_dir": tmp, **(extra or {})})
         a.pve = MagicMock()
         a.pve.cluster_state.return_value = ("pve1", tags, list(HEALTHY))
         return a
@@ -193,7 +193,7 @@ class TestAgentLoop(unittest.TestCase):
             a = self.make_agent(tmp, ["proxlb", "proxlb-cmd-run"])
             a.startup_run_done = True
             a.tick()
-            a.pve.set_tags.assert_called_once_with("pve1", 120, ["proxlb"])
+            a.pve.set_tags.assert_called_once_with("pve1", 120, ["proxlb"], "lxc")
             self.assertFalse(a.status["dry_run"])
             self.assertEqual(a.status["trigger"], "gui")
 
@@ -234,6 +234,46 @@ class TestAgentLoop(unittest.TestCase):
             a.tick()
             self.assertFalse(a.status["dry_run"])
             self.assertIsNone(a.status["paused"])
+
+    def test_external_host_with_anchor_vm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            a = self.make_agent(tmp, ["proxlb", "proxlb-cmd-dryrun"],
+                                {"ctid": None, "vmid": 9000, "guest_type": "qemu"})
+            a.startup_run_done = True
+            a.tick()
+            a.pve.cluster_state.assert_called_with(9000, "qemu")
+            a.pve.set_tags.assert_called_once_with("pve1", 9000, ["proxlb"], "qemu")
+            args = a.pve.set_description.call_args[0]
+            self.assertEqual(args[1], 9000)
+            self.assertEqual(args[3], "qemu")
+            self.assertEqual(a.status["guest_type"], "qemu")
+            self.assertTrue(a.status["host"])
+            self.assertIn("ProxLB runs on", args[2])
+
+    def test_tls_relax_reaches_proxlb_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            a = self.make_agent(tmp, ["proxlb", "proxlb-cmd-dryrun"])
+            # fake "python" that prints PYTHONPATH instead of running ProxLB
+            fake = Path(tmp) / "env_python"
+            fake.write_text("#!/bin/sh\necho \"x - ProxLB - INFO - PYTHONPATH=$PYTHONPATH\"\n")
+            fake.chmod(0o755)
+            a.python = str(fake)
+            a.startup_run_done = True
+            a.tick()
+            log_text = (Path(tmp) / "last-run.log").read_text()
+            self.assertIn(str(agent.TLS_RELAX_DIR), log_text)
+            import ssl
+            import urllib3.connection
+            ctx = urllib3.connection.create_urllib3_context()  # type: ignore[attr-defined]
+            self.assertFalse(ctx.verify_flags & getattr(ssl, "VERIFY_X509_STRICT", 0))
+            self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)  # still verifying
+
+    def test_bad_agent_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                self.make_agent(tmp, [], {"ctid": None})
+            with self.assertRaises(ValueError):
+                self.make_agent(tmp, [], {"guest_type": "vm"})
 
     def test_idle_tick_does_not_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
