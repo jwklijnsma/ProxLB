@@ -60,6 +60,7 @@ install -D -m 0755 "$HERE/proxlb-lxc.wrapper" "$TREE/usr/sbin/proxlb-lxc"
 
 # --- docs --------------------------------------------------------------------
 install -D -m 0644 contrib/proxmox/README.md "$DOC/README.md"
+install -D -m 0644 contrib/proxmox/GUI-PLUGIN.md "$DOC/GUI-PLUGIN.md"
 cat > "$DOC/copyright" <<COPY
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: ProxLB

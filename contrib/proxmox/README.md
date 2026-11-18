@@ -32,6 +32,9 @@ do or has done.
 No extra ports, reverse proxy, CORS or certificates are needed. The GUI only
 uses the normal Proxmox API with the logged-in user's session.
 
+> **Step-by-step guide:** [GUI-PLUGIN.md](GUI-PLUGIN.md) explains how to add the plugin and connect it
+> to ProxLB, including an existing ProxLB container, user rights and troubleshooting.
+
 ## Install as .deb package (recommended)
 
 GitHub Actions builds the **`proxlb-pve`** package on every change
@@ -52,7 +55,8 @@ The package:
 * re-applies it automatically after every `pve-manager` update (dpkg trigger, no apt hook),
 * brings the **`proxlb-lxc`** command with the ProxLB source bundled, so no git is needed on the host,
 * replaces an earlier script install of the plugin on that node,
-* removes the tab cleanly with `apt remove proxlb-pve`.
+* removes the tab cleanly with `apt remove proxlb-pve`,
+* ships this guide and [GUI-PLUGIN.md](GUI-PLUGIN.md) in `/usr/share/doc/proxlb-pve/`.
 
 Then create the container on **one** node. Options are the same as below:
 

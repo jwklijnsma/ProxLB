@@ -121,6 +121,8 @@ proxlb-lxc                                           # see --help for IP, storag
 
 Without the package: `git clone https://github.com/jwklijnsma/ProxLB.git && bash ProxLB/contrib/proxmox/proxlb-lxc.sh`.
 
+Step-by-step guide to add the plugin and connect it to ProxLB (also an existing ProxLB container): [GUI-PLUGIN.md](../contrib/proxmox/GUI-PLUGIN.md).
+
 ![ProxLB tab in the Proxmox web interface](images/proxlb-gui.png)
 
 Scheduled runs only preview (dry-run) until you switch on automatic balancing in the GUI. The container is made highly available with Proxmox HA (shared storage, or local ZFS with replication), so ProxLB keeps working when a node fails, and real balancing pauses while the cluster is degraded. See [contrib/proxmox/README.md](../contrib/proxmox/README.md) for details.
