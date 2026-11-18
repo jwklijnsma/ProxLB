@@ -48,6 +48,12 @@ PROXLB_DATA = {
     },
 }
 
+HEALTHY: list[dict[str, Any]] = [
+    {"type": "node", "node": "pve1", "status": "online"},
+    {"type": "node", "node": "pve2", "status": "online"},
+    {"type": "qemu", "vmid": 101, "node": "pve1", "hastate": "started"},
+]
+
 CFG = {
     "balancing": {"method": "cpu", "mode": "used", "balanciness": 7, "enable": True},
     "service": {"daemon": True, "enable_ha": True,
@@ -136,6 +142,21 @@ class TestAgentHelpers(unittest.TestCase):
         self.assertEqual(parsed["moves_total"], 500)
 
 
+class TestClusterDegraded(unittest.TestCase):
+    def test_healthy(self) -> None:
+        self.assertIsNone(agent.cluster_degraded(HEALTHY, []))
+
+    def test_node_offline(self) -> None:
+        res = HEALTHY + [{"type": "node", "node": "pve3", "status": "offline"}]
+        self.assertEqual(agent.cluster_degraded(res, []), "node(s) offline: pve3")
+        self.assertIsNone(agent.cluster_degraded(res, ["pve3"]))  # ignored nodes do not count
+
+    def test_ha_recovery(self) -> None:
+        res = HEALTHY + [{"type": "lxc", "vmid": 7, "node": "pve2", "hastate": "recovery"},
+                         {"type": "qemu", "vmid": 8, "node": "pve2", "hastate": "fence"}]
+        self.assertEqual(agent.cluster_degraded(res, []), "HA is recovering 2 guest(s)")
+
+
 class TestAgentLoop(unittest.TestCase):
     def make_agent(self, tmp: str, tags: list[str]) -> Any:
         cfg_path = Path(tmp) / "proxlb.yaml"
@@ -151,7 +172,7 @@ class TestAgentLoop(unittest.TestCase):
         a = agent.Agent({"ctid": 120, "proxlb_config": str(cfg_path),
                          "python": str(fake_proxlb), "state_dir": tmp})
         a.pve = MagicMock()
-        a.pve.find_ct.return_value = ("pve1", tags)
+        a.pve.cluster_state.return_value = ("pve1", tags, list(HEALTHY))
         return a
 
     def test_startup_run_is_dry_run(self) -> None:
@@ -194,6 +215,25 @@ class TestAgentLoop(unittest.TestCase):
             a.tick()
             self.assertEqual(a.status["trigger"], "cli")
             self.assertFalse((Path(tmp) / "trigger-dryrun").exists())
+
+    def test_degraded_cluster_downgrades_to_dry_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            a = self.make_agent(tmp, ["proxlb", "proxlb-active", "proxlb-cmd-run"])
+            a.pve.cluster_state.return_value = (
+                "pve1", ["proxlb", "proxlb-active", "proxlb-cmd-run"],
+                HEALTHY + [{"type": "node", "node": "pve3", "status": "offline"}])
+            a.startup_run_done = True
+            a.tick()
+            self.assertTrue(a.status["dry_run"])  # real run refused while degraded
+            self.assertEqual(a.status["paused"], "node(s) offline: pve3")
+            text = a.pve.set_description.call_args[0][2]
+            self.assertIn("degraded - balancing paused", text)
+            # cluster recovers -> scheduled run balances for real again
+            a.pve.cluster_state.return_value = ("pve1", ["proxlb", "proxlb-active"], list(HEALTHY))
+            a.next_run = 0
+            a.tick()
+            self.assertFalse(a.status["dry_run"])
+            self.assertIsNone(a.status["paused"])
 
     def test_idle_tick_does_not_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -16,7 +16,12 @@
 #    2. creates an unprivileged Debian container (tagged "proxlb"),
 #    3. installs ProxLB + proxlb-agent in a Python venv in the container,
 #    4. writes /etc/proxlb/proxlb.yaml with all cluster nodes as API hosts,
-#    5. installs the web-interface plugin (Datacenter -> ProxLB).
+#    5. installs the web-interface plugin (Datacenter -> ProxLB),
+#    6. makes the container highly available (ha-manager): if its node dies,
+#       Proxmox restarts it on another node. Needs shared storage, or local
+#       ZFS (then storage replication to the other nodes is set up).
+#
+#    bash proxlb-lxc.sh --enable-ha 120       # make an existing CT HA
 #
 #  Safe by default: scheduled runs are dry-runs until you switch on
 #  "Automatic balancing" in the GUI (or pass --active).
@@ -47,6 +52,9 @@ REPO="https://github.com/jwklijnsma/ProxLB.git"
 BRANCH="main"
 SOURCE="auto"          # auto | local | git
 UPGRADE=""
+HA="auto"             # auto | yes | no
+ENABLE_HA=""
+REPL_SCHEDULE="*/5"
 PVE_USER="proxlb@pve"
 
 usage() {
@@ -81,6 +89,11 @@ Source / GUI
   --no-gui               do not install the web-interface plugin
   --gui-this-node-only   install the plugin only on this node
   --upgrade CTID         upgrade ProxLB, agent and GUI of an existing container
+
+High availability
+  --ha / --no-ha         make the CT HA (default: auto = when the cluster and storage allow it)
+  --enable-ha CTID       make an existing ProxLB CT HA
+  --repl-schedule S      replication schedule for local ZFS (default: $REPL_SCHEDULE)
 EOF
 }
 
@@ -109,6 +122,10 @@ while [ $# -gt 0 ]; do
         --no-gui) GUI=0 ;;
         --gui-this-node-only) GUI_ALL_NODES=0 ;;
         --upgrade) UPGRADE="$2"; shift ;;
+        --ha) HA=yes ;;
+        --no-ha) HA=no ;;
+        --enable-ha) ENABLE_HA="$2"; HA=yes; shift ;;
+        --repl-schedule) REPL_SCHEDULE="$2"; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; usage; exit 1 ;;
     esac
@@ -189,6 +206,91 @@ install_gui() {
     bash "$tmp/install-gui.sh" "${args[@]}" || warn "GUI plugin installation failed"
     rm -rf "$tmp"
 }
+
+# ---------------------------------------------------------- high availability ---
+# Proxmox HA restarts the container on another node when its node fails.
+# The rootfs must be reachable there: shared storage, or local ZFS with
+# storage replication (the CT then restarts from the last replica).
+SHARED_TYPES=" rbd cephfs nfs cifs glusterfs iscsi iscsidirect zfs "
+setup_ha() {
+    [ "$HA" = "no" ] && return 0
+    local nodes count rootfs stype shared allowed ct_node others="" n i
+    nodes=$(pvesh get /cluster/status --output-format json | json_get '
+        print join(" ", sort map { $_->{name} } grep { $_->{type} eq "node" } @$d)')
+    count=$(echo "$nodes" | wc -w)
+    if [ "$count" -lt 2 ]; then
+        [ "$HA" = "yes" ] && warn "single node - HA needs a cluster, skipping"
+        HA_RESULT="not possible (single node)"
+        return 0
+    fi
+    [ "$count" -eq 2 ] && warn "2-node cluster: when one node fails the other has no quorum and HA cannot act. Add a QDevice: pvecm qdevice setup <ip>"
+
+    ct_node=$(pvesh get /cluster/resources --type vm --output-format json | \
+        PLB_CTID="$CTID" json_get 'for (@$d) { print $_->{node} if $_->{type} eq "lxc" && $_->{vmid} == $ENV{PLB_CTID} }')
+    [ -n "$ct_node" ] || die "container $CTID not found in the cluster"
+    rootfs=$(pvesh get "/nodes/$ct_node/lxc/$CTID/config" --output-format json | \
+        json_get 'my ($s) = ($d->{rootfs} // "") =~ /^([^:]+):/; print $s // ""')
+    read -r stype shared allowed < <(pvesh get "/storage/$rootfs" --output-format json | json_get '
+        print join(" ", $d->{type} // "", $d->{shared} ? 1 : 0, $d->{nodes} // "-")')
+    [[ "$SHARED_TYPES" == *" $stype "* ]] && shared=1
+
+    if [ "$shared" = "1" ]; then
+        info "storage $rootfs ($stype) is shared - enabling HA"
+    elif [ "$stype" = "zfspool" ]; then
+        for n in $nodes; do
+            [ "$n" = "$ct_node" ] && continue
+            if [ "$allowed" != "-" ] && [[ ",$allowed," != *",$n,"* ]]; then
+                warn "storage $rootfs is not available on $n - HA could start the CT there and fail"
+                continue
+            fi
+            others="$others $n"
+        done
+        if [ -z "$others" ]; then
+            warn "no other node has storage $rootfs - HA not possible"
+            HA_RESULT="not possible (no replication target)"
+            return 0
+        fi
+        info "storage $rootfs is local ZFS - replicating CT $CTID to:$others (every $REPL_SCHEDULE)"
+        for n in $others; do
+            # existing job to this node? otherwise use the next free job number
+            i=$(pvesh get /cluster/replication --output-format json | PLB_CTID="$CTID" PLB_NODE="$n" json_get '
+                my @j = grep { $_->{guest} == $ENV{PLB_CTID} } @$d;
+                if (grep { $_->{target} eq $ENV{PLB_NODE} } @j) { print "exists"; exit }
+                my %used = map { $_->{jobnum} => 1 } @j; my $i = 0; $i++ while $used{$i}; print $i')
+            [ "$i" = "exists" ] && continue
+            if pvesh create /cluster/replication --id "$CTID-$i" --type local --target "$n" \
+                    --schedule "$REPL_SCHEDULE" --comment "ProxLB HA" >/dev/null; then
+                pvesh create "/nodes/$ct_node/replication/$CTID-$i/schedule_now" >/dev/null || true
+            else
+                warn "replication to $n failed"
+            fi
+        done
+    else
+        if [ "$HA" = "yes" ]; then
+            warn "storage $rootfs ($stype) is local and not ZFS - another node cannot start this CT."
+            warn "move it first, e.g.: pct move-volume $CTID rootfs <shared-storage>, then: $0 --enable-ha $CTID"
+        else
+            info "storage $rootfs is local - HA skipped (use shared storage or ZFS, then --enable-ha $CTID)"
+        fi
+        HA_RESULT="not possible (local $stype storage)"
+        return 0
+    fi
+
+    if ha-manager config 2>/dev/null | grep -q "^ct: *$CTID\$"; then
+        ha-manager set "ct:$CTID" --state started
+    else
+        ha-manager add "ct:$CTID" --state started --max_restart 2 --max_relocate 2 --comment "ProxLB"
+    fi
+    HA_RESULT="enabled (ha-manager ct:$CTID${others:+, ZFS replication to$others})"
+    info "HA $HA_RESULT"
+}
+HA_RESULT="off"
+
+if [ -n "$ENABLE_HA" ]; then
+    CTID="$ENABLE_HA"
+    setup_ha
+    exit 0
+fi
 
 # ----------------------------------------------------------------- upgrade ---
 if [ -n "$UPGRADE" ]; then
@@ -386,6 +488,8 @@ python: /opt/proxlb/venv/bin/python
 poll_seconds: 10
 run_timeout_seconds: 14400
 state_dir: /var/lib/proxlb
+# Turn real runs into dry-runs while a node is offline or HA recovers guests
+pause_when_degraded: true
 EOF
 pct push "$CTID" "$CFG" /etc/proxlb/agent.yaml --perms 0640
 rm -f "$CFG"
@@ -395,6 +499,7 @@ ct systemctl enable --now proxlb-agent >/dev/null 2>&1
 sleep 3
 ct systemctl is-active --quiet proxlb-agent || warn "proxlb-agent is not running - check: pct exec $CTID -- journalctl -u proxlb-agent"
 
+setup_ha
 install_gui
 
 CT_IP=$(ct hostname -I 2>/dev/null | awk '{print $1}' || true)
@@ -405,6 +510,7 @@ ${C_G}ProxLB is installed.${C_0}
   Container         CT $CTID ($CT_HOSTNAME${CT_IP:+, $CT_IP})
   API user / token  $PVE_USER!$TOKEN_NAME
   Mode              $( [ "$ACTIVE" -eq 1 ] && echo "automatic balancing ON" || echo "dry-run only (switch on in the GUI)" )
+  High availability $HA_RESULT
   Schedule          every $INTERVAL $INTERVAL_FORMAT, method $METHOD, balanciness $BALANCINESS %
 
   Web interface     reload the page (Ctrl+F5) and open  Datacenter -> ProxLB

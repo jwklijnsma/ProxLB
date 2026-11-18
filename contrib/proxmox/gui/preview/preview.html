@@ -34,15 +34,31 @@ const status = {
     [131, 'grafana', 'ct', 'pve1', 'pve3'],
   ],
   moves_total: 3, guests: 27, ignored: 2, ok: true, error: null,
-  auto: false, next_run: now + 2100, hb: now - 20, ctid: 120,
+  auto: true, next_run: now + 2100, hb: now - 20, ctid: 120,
 };
 const resources = [
   { type: 'node', node: 'pve1', status: 'online', cpu: 0.352, maxcpu: 16, mem: 52.3e9, maxmem: 64e9, disk: 22e9, maxdisk: 100e9 },
   { type: 'node', node: 'pve2', status: 'online', cpu: 0.187, maxcpu: 16, mem: 28.6e9, maxmem: 64e9, disk: 31e9, maxdisk: 100e9 },
   { type: 'node', node: 'pve3', status: 'online', cpu: 0.124, maxcpu: 12, mem: 12.6e9, maxmem: 32e9, disk: 18e9, maxdisk: 100e9 },
-  { type: 'lxc', vmid: 120, node: 'pve2', name: 'proxlb', status: 'running', tags: 'proxlb;plb_ignore_vm' },
+  { type: 'lxc', vmid: 120, node: 'pve2', name: 'proxlb', status: 'running', hastate: 'started', tags: 'proxlb;plb_ignore_vm;proxlb-active' },
 ];
-const guestsPerNode = { pve1: 12, pve2: 8, pve3: 6 };
+// ?degraded : pve1 has failed, HA restarted its guests elsewhere, ProxLB pauses
+const degraded = location.search.indexOf('degraded') !== -1;
+if (degraded) {
+  Object.assign(resources[0], { status: 'offline', cpu: 0, mem: 0 });
+  Object.assign(resources[1], { cpu: 0.46, mem: 49.1e9 });
+  Object.assign(resources[2], { cpu: 0.31, mem: 25.2e9 });
+  Object.assign(status, {
+    dry_run: true, trigger: 'schedule', started: now - 140, finished: now - 125, auto: true,
+    paused: 'node(s) offline: pve1; HA is recovering 2 guest(s)',
+    nodes: { pve2: [76.4, 45.2, 31.0, 0], pve3: [78.8, 30.9, 18.0, 0] },
+    moves: [], moves_total: 0,
+  });
+  resources.push({ type: 'qemu', vmid: 104, node: 'pve3', status: 'running', hastate: 'recovery' });
+  resources.push({ type: 'qemu', vmid: 112, node: 'pve2', status: 'running', hastate: 'recovery' });
+}
+const ctTags = 'proxlb;plb_ignore_vm;proxlb-active';
+const guestsPerNode = location.search.indexOf('degraded') !== -1 ? { pve1: 0, pve2: 15, pve3: 11 } : { pve1: 12, pve2: 8, pve3: 6 };
 Object.keys(guestsPerNode).forEach((n) => {
   for (let i = 0; i < guestsPerNode[n]; i++) {
     resources.push({ type: 'qemu', vmid: 200 + i, node: n, status: 'running' });
@@ -55,7 +71,7 @@ window.Proxmox = { Utils: { API2Request: function(opts) {
       opts.success({ result: { data: resources } });
     } else if (/\/lxc\/120\/config$/.test(opts.url)) {
       opts.success({ result: { data: {
-        tags: 'proxlb;plb_ignore_vm', digest: 'x',
+        tags: ctTags, digest: 'x',
         description: 'ProxLB\n<!--proxlb-status:' + JSON.stringify(status) + '-->',
       } } });
     }

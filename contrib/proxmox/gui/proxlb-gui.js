@@ -22,7 +22,7 @@
     }
 
     const PLB = {
-        VERSION: '1.0.0',
+        VERSION: '1.1.0',
         TAG_CT: 'proxlb',
         TAG_ACTIVE: 'proxlb-active',
         TAG_CMD_DRYRUN: 'proxlb-cmd-dryrun',
@@ -387,9 +387,19 @@
             } else {
                 let ctState = ctRunning ? PLB.badge(gettext('running'), '#5cb85c')
                     : PLB.badge(ct.status || 'unknown', '#d9534f');
+                let haState = ct.hastate
+                    ? PLB.badge('HA: ' + ct.hastate, ct.hastate === 'started' ? '#5cb85c' : '#f0ad4e')
+                    : PLB.badge(gettext('HA: off'), '#777');
                 lines.push('<b>' + gettext('Container') + ':</b> CT ' + ct.vmid + ' (' +
                     Ext.htmlEncode(ct.name || '') + ') on ' + Ext.htmlEncode(ct.node) + ' ' + ctState +
-                    (stale ? ' ' + PLB.badge(gettext('agent not responding'), '#d9534f') : ''));
+                    ' ' + haState +
+                    (stale ? ' ' + PLB.badge(gettext('agent not responding'), '#d9534f') : '') +
+                    (!ct.hastate ? ' <span style="opacity:0.7">' +
+                        gettext('(survive a node failure: proxlb-lxc.sh --enable-ha') + ' ' + ct.vmid + ')</span>' : ''));
+                lines.push('<b>' + gettext('Cluster') + ':</b> ' + (st.paused
+                    ? PLB.badge(gettext('degraded'), '#d9534f') + ' ' +
+                      gettext('real balancing paused until the cluster is healthy') + ' - ' + Ext.htmlEncode(st.paused)
+                    : PLB.badge(gettext('healthy'), '#5cb85c')));
 
                 let result;
                 if (running) {
@@ -433,7 +443,8 @@
             // ---- buttons -----------------------------------------------------
             let canAct = !!ct && ctRunning && !running && !queued;
             me.btnPreview.setDisabled(!canAct);
-            me.btnRun.setDisabled(!canAct);
+            me.btnRun.setDisabled(!canAct || !!st.paused);
+            me.btnRun.setTooltip(st.paused ? gettext('Paused: the cluster is degraded') : '');
             me.btnAuto.setDisabled(!ct);
             me.btnCt.setDisabled(!ct);
             me.btnAuto.setIconCls(auto ? 'fa fa-toggle-on' : 'fa fa-toggle-off');

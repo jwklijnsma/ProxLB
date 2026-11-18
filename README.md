@@ -238,7 +238,7 @@ bash ProxLB/contrib/proxmox/proxlb-lxc.sh            # see --help for IP, storag
 
 ![ProxLB tab in the Proxmox web interface](docs/images/proxlb-gui.png)
 
-Scheduled runs only preview (dry-run) until you switch on automatic balancing in the GUI. See [contrib/proxmox/README.md](contrib/proxmox/README.md) for details.
+Scheduled runs only preview (dry-run) until you switch on automatic balancing in the GUI. The container is made highly available with Proxmox HA (shared storage, or local ZFS with replication), so ProxLB keeps working when a node fails, and real balancing pauses while the cluster is degraded. See [contrib/proxmox/README.md](contrib/proxmox/README.md) for details.
 
 ### Source
 ProxLB can also easily be used from the provided sources - for traditional systems but also as a Docker/Podman container image.
