@@ -171,8 +171,8 @@ test('no run yet: no fake verdict, threshold or "balanced" claim', () => {
     const anchor = { type: 'qemu', vmid: 1000, node: 'node04', status: 'stopped', name: 'proxlb-anchor', hastate: 'stopped' };
     const me = makeView(classes, { ct: anchor, status: null, ctTags: ['proxlb', 'proxlb-active'] });
     me.status = {};
-    let emptyText = null;
-    me.down = () => ({ setTitle(t) { me.movesTitle = t; }, getView: () => ({ emptyText: '', refresh() { emptyText = this.emptyText; } }) });
+    let refreshed = false;
+    me.down = () => ({ setTitle(t) { me.movesTitle = t; }, getView: () => ({ refresh() { refreshed = true; } }) });
     me.render_();
     const s = text(me.summary.html);
     assert.match(s, /waiting for agent/);
@@ -180,8 +180,14 @@ test('no run yet: no fake verdict, threshold or "balanced" claim', () => {
     assert.match(s, /Cluster: unknown/);
     assert.match(s, /threshold known after the first run/);
     assert.doesNotMatch(s, /imbalanced|threshold 10/);
-    assert.strictEqual(me.movesTitle, 'Migrations of the last run');
-    assert.match(emptyText, /No run yet/);
+    assert.strictEqual(me.movesTitle, 'Migrations of the last run - no run yet');
+    // view.refresh() before the grid has a size blanks the whole tab on ExtJS
+    assert.strictEqual(refreshed, false);
+});
+
+test('plugin never refreshes grid views itself (blank-tab bug)', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'proxlb-gui.js'), 'utf8');
+    assert.ok(!/\.refresh\(\)/.test(src), 'view.refresh() found in proxlb-gui.js');
 });
 
 test('plugin source is not strict mode (ExtJS callParent needs fn.caller)', () => {

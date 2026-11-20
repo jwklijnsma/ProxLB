@@ -24,7 +24,7 @@
     }
 
     const PLB = {
-        VERSION: '1.3.0',
+        VERSION: '1.3.1',
         TAG_CT: 'proxlb',
         TAG_ACTIVE: 'proxlb-active',
         TAG_CMD_DRYRUN: 'proxlb-cmd-dryrun',
@@ -215,7 +215,9 @@
                     title: gettext('Migrations of the last run'),
                     store: me.moveStore,
                     minHeight: 120,
-                    emptyText: gettext('No migrations - the cluster is balanced.'),
+                    // fixed text: changing it later needs a refresh of the grid view, which breaks the
+                    // panel layout before the grid has a size (blank tab) - the title says it
+                    emptyText: gettext('No migrations to show.'),
                     viewConfig: { deferEmptyText: false },
                     columns: [
                         { header: 'ID', dataIndex: 'vmid', width: 80 },
@@ -373,20 +375,18 @@
             })));
             let movesGrid = me.down('#moves');
             if (movesGrid) {
-                let title = !hasRun ? gettext('Migrations of the last run')
+                let title = !hasRun ? gettext('Migrations of the last run') + ' - ' + gettext('no run yet')
                     : st.dry_run ? gettext('Planned migrations (preview of last run)')
                         : gettext('Migrations performed by last run');
+                if (hasRun && st.ok && !st.moves_total) {
+                    title += ' - ' + gettext('none, the cluster is balanced');
+                }
                 if (st.moves_total > (st.moves || []).length) {
                     title += ' - ' + Ext.String.format(gettext('showing {0} of {1}'),
                         (st.moves || []).length, st.moves_total);
                 }
-                movesGrid.setTitle(title);
-                let view = movesGrid.getView ? movesGrid.getView() : null;
-                let empty = hasRun ? gettext('No migrations - the cluster is balanced.')
-                    : gettext('No run yet - nothing to show until the agent reports.');
-                if (view && view.emptyText !== empty) {
-                    view.emptyText = empty;
-                    view.refresh();
+                if (movesGrid.title !== title) {
+                    movesGrid.setTitle(title);
                 }
             }
 

@@ -1,0 +1,2 @@
+Fixed:
+  - GUI 1.3.0 showed an empty Datacenter -> ProxLB tab (only the toolbar): it refreshed the migrations grid view while updating, which breaks the panel layout. 1.3.1 never refreshes grid views; "no run yet" and "none, the cluster is balanced" are shown in the grid title. The CI render test now fails when the status box or a grid is not visible.
