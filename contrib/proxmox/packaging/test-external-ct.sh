@@ -35,11 +35,12 @@ case "\$1 \$2" in
   "get /cluster/resources") cat <<J
 [{"type":"qemu","vmid":138,"node":"pve1","status":"stopped","tags":"proxlb;plb_ignore_vm","name":"proxlb-anchor"},
  {"type":"lxc","vmid":150,"node":"pve1","status":"\$(cat $CT_STATUS_FILE)","tags":"\$(cat $CT_TAGS_FILE)","name":"proxlb"},
- {"type":"qemu","vmid":200,"node":"pve1","status":"running","tags":"","name":"db"}]
+ {"type":"qemu","vmid":200,"node":"pve1","status":"running","tags":"","name":"db"}\$(cat $WORK/extra_resources 2>/dev/null)]
 J
   ;;
   "get /cluster/status") echo '[{"type":"cluster","name":"lab"},{"type":"node","name":"pve1","local":1,"ip":"127.0.0.1","online":1}]' ;;
   "get /cluster/nextid") echo 301 ;;
+  "get /nodes/pve1/lxc/301/config") echo '{"tags":"plb_ignore_vm;proxlb-host"}' ;;
   "get /nodes/pve1/lxc/150/config") echo "{\"tags\":\"\$(cat $CT_TAGS_FILE)\"}" ;;
   "set /nodes/pve1/lxc/150/config") [ "\$3" = --tags ] && echo "\$4" > "$CT_TAGS_FILE" ;;
   *) echo "unexpected pvesh \$*" >&2; exit 1 ;;
@@ -58,10 +59,23 @@ EOF
 for c in qm ha-manager; do
     printf '#!/bin/bash\necho "%s $*" >> "%s"\n' "$c" "$LOG" > "$WORK/bin/$c"
 done
+cat > "$WORK/bin/pveam" <<'EOF'
+#!/bin/bash
+case "$1" in
+  available) printf 'system          debian-12-standard_12.12-1_amd64.tar.zst\nsystem          debian-13-standard_13.1-2_amd64.tar.zst\n' ;;
+  list) echo "local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst 123MB" ;;
+esac
+exit 0
+EOF
+cat > "$WORK/bin/pvesm" <<'EOF'
+#!/bin/bash
+printf 'Name Type Status Total Used Available %%\nlocal dir active 1 1 1 1%%\nlocal-lvm lvmthin active 1 1 1 1%%\n'
+EOF
 cat > "$WORK/bin/pct" <<EOF
 #!/bin/bash
 echo "pct \$*" >> "$LOG"
 case "\$1" in
+  create) echo ',{"type":"lxc","vmid":'"\$2"',"node":"pve1","status":"running","tags":"plb_ignore_vm;proxlb-host","name":"proxlb"}' >> "$WORK/extra_resources" ;;
   push) install -m "\${6:-0644}" "\$3" "\$4" ;;          # pct push CT SRC DST --perms MODE
   exec) shift 3; "\$@" ;;                                # pct exec CT -- CMD...
 esac
@@ -127,6 +141,28 @@ grep -q "using the existing bundle" "$WORK/run2.log" || fail "existing bundle no
 grep -q "user token add" "$LOG" && fail "created a token although a bundle existed"
 grep -q "^pvesh set /nodes/pve1/lxc/150/config" "$LOG" && fail "tag added twice"
 pass "existing bundle used, no extra token, tag not duplicated"
+
+echo "== proxlb-external --vmid 138 --create-ct (new LXC host)"
+out=$(bash "$EXT" --vmid 138 --create-ct --ct 150 2>&1) && fail "accepted --create-ct with --ct"
+grep -q "cannot be combined" <<<"$out" || fail "wrong error: $out"
+bash "$EXT" --vmid 138 --rotate-token --no-gui > /dev/null 2>&1 || fail "--rotate-token"
+: > "$LOG"
+PROXLB_NET_CHECK_HOST=localhost bash "$EXT" --vmid 138 --create-ct --ip 10.0.0.60/24 --gw 10.0.0.1 \
+    > "$WORK/run3.log" 2>&1 || { cat "$WORK/run3.log"; fail "--create-ct"; }
+create=$(grep "^pct create" "$LOG") || fail "no pct create"
+grep -q "^pct create 301 local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst " <<<"$create" || fail "template/ctid: $create"
+grep -q -- "--tags plb_ignore_vm;proxlb-host " <<<"$create" || fail "tags: $create"
+grep -q -- "--tags proxlb;" <<<"$create" && fail "new host must not carry the anchor tag 'proxlb'"
+grep -q -- "--rootfs local-lvm:6 " <<<"$create" || fail "storage: $create"
+grep -q -- "--net0 name=eth0,bridge=vmbr0,ip=10.0.0.60/24,gw=10.0.0.1 " <<<"$create" || fail "network: $create"
+grep -q -- "--unprivileged 1" <<<"$create" || fail "unprivileged"
+grep -q "^pct start 301" "$LOG" || fail "not started"
+grep -q "^pct push 301 .* /root/proxlb-bundle.tar --perms 0600" "$LOG" || fail "bundle not pushed into the new CT"
+grep -q "^pvesh set /nodes/pve1/lxc/301/config" "$LOG" && fail "tags changed although plb_ignore_vm is set"
+grep -q "^qm create" "$LOG" && fail "anchor VM created again"
+grep -q "New ProxLB host   LXC 301 (proxlb)" "$WORK/run3.log" || fail "summary"
+[ ! -e /root/proxlb-external-138.tar ] || fail "bundle left on the host"
+pass "new unprivileged Debian 13 LXC 301 (tags plb_ignore_vm;proxlb-host) created, started and connected to anchor 138"
 
 bash "$ROOT/contrib/proxmox/agent/install-agent.sh" --uninstall >/dev/null
 echo "ALL TESTS PASSED"

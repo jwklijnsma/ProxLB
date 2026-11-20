@@ -11,6 +11,8 @@
 #    bash proxlb-external.sh --ct 150         # ... and connect LXC 150 automatically
 #    bash proxlb-external.sh --vmid 138 --ct 150   # existing anchor 138 -> connect LXC 150
 #    bash proxlb-external.sh --ssh root@mgmt01     # connect a machine over SSH
+#    bash proxlb-external.sh --create-ct --ip 10.0.0.60/24 --gw 10.0.0.1
+#                                             # create a new LXC host for ProxLB too
 #
 #  What it does:
 #    1. creates a tiny "anchor" VM: no disks, no network, never started. It
@@ -52,6 +54,20 @@ Usage: $CMD [options]
 Connect the ProxLB machine automatically (instead of copying the bundle):
   --ct CTID              ProxLB runs in this LXC container of the cluster (any node)
   --ssh USER@HOST        ProxLB runs on this machine, reachable over SSH as root
+  --create-ct            create a new Debian LXC on this node as the ProxLB host
+                         (tags plb_ignore_vm, proxlb-host; HA in a cluster unless --no-ha)
+
+Options for --create-ct:
+  --ctid ID              container ID (default: next free ID)
+  --hostname NAME        hostname (default: $CT_HOSTNAME)
+  --storage STORAGE      rootfs storage (default: local-lvm, else first rootdir storage)
+  --template-storage S   storage for the Debian template (default: $TEMPLATE_STORAGE)
+  --bridge BRIDGE        network bridge (default: $BRIDGE)
+  --vlan TAG             VLAN tag
+  --ip CIDR|dhcp         IPv4 address, e.g. 10.0.0.60/24 (default: dhcp)
+  --gw IP                IPv4 gateway (with a static --ip)
+  --dns IP               DNS server
+  --cores N / --memory MB / --disk GB   (default: $CORES / $MEMORY / $DISK)
 
 An existing anchor VM (--vmid, tag proxlb) is reused, with its bundle if it is
 still in /root; otherwise a new token is created.
@@ -61,6 +77,19 @@ EOF
 ROTATE=0
 TARGET_CT=""
 TARGET_SSH=""
+CREATE_CT=0
+NEW_CTID=""
+CT_HOSTNAME="proxlb"
+STORAGE=""
+TEMPLATE_STORAGE="local"
+BRIDGE="vmbr0"
+VLAN=""
+IP="dhcp"
+GW=""
+DNS=""
+CORES=1
+MEMORY=1024
+DISK=6
 while [ $# -gt 0 ]; do
     case "$1" in
         --vmid) VMID="$2"; shift ;;
@@ -71,6 +100,19 @@ while [ $# -gt 0 ]; do
         --rotate-token) ROTATE=1 ;;
         --ct) TARGET_CT="$2"; shift ;;
         --ssh) TARGET_SSH="$2"; shift ;;
+        --create-ct) CREATE_CT=1 ;;
+        --ctid) NEW_CTID="$2"; shift ;;
+        --hostname) CT_HOSTNAME="$2"; shift ;;
+        --storage) STORAGE="$2"; shift ;;
+        --template-storage) TEMPLATE_STORAGE="$2"; shift ;;
+        --bridge) BRIDGE="$2"; shift ;;
+        --vlan) VLAN="$2"; shift ;;
+        --ip) IP="$2"; shift ;;
+        --gw) GW="$2"; shift ;;
+        --dns) DNS="$2"; shift ;;
+        --cores) CORES="$2"; shift ;;
+        --memory) MEMORY="$2"; shift ;;
+        --disk) DISK="$2"; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; usage; exit 1 ;;
     esac
@@ -103,6 +145,65 @@ node_ip() {
 }
 
 [ -n "$TARGET_CT" ] && [ -n "$TARGET_SSH" ] && die "use either --ct or --ssh, not both"
+if [ "$CREATE_CT" -eq 1 ]; then
+    [ -z "$TARGET_CT" ] && [ -z "$TARGET_SSH" ] || die "--create-ct cannot be combined with --ct or --ssh"
+    [ "$ROTATE" -eq 0 ] || die "--create-ct cannot be combined with --rotate-token"
+fi
+
+# ------------------------------------------- create a new LXC host (opt.) ---
+create_ct() {
+    [ -n "$NEW_CTID" ] || NEW_CTID=$(pvesh get /cluster/nextid)
+    [ -z "$(guest_node "$NEW_CTID")" ] || die "ID $NEW_CTID is already in use"
+    [ -n "$VMID" ] && [ "$VMID" = "$NEW_CTID" ] && die "--ctid and --vmid must differ"
+    if [ -z "$STORAGE" ]; then
+        local storages
+        storages=$(pvesm status --content rootdir 2>/dev/null | awk 'NR>1 && $3=="active" {print $1}')
+        if echo "$storages" | grep -qx local-lvm; then STORAGE=local-lvm
+        elif echo "$storages" | grep -qx local-zfs; then STORAGE=local-zfs
+        else STORAGE=$(echo "$storages" | head -1); fi
+        [ -n "$STORAGE" ] || die "no storage for containers found, use --storage"
+    fi
+    info "looking for a Debian template"
+    pveam update >/dev/null 2>&1 || warn "pveam update failed, using the cached template list"
+    local template="" series
+    for series in debian-13-standard debian-12-standard; do
+        template=$(pveam available --section system 2>/dev/null | awk '{print $2}' | grep "^${series}_" | sort -V | tail -1 || true)
+        [ -n "$template" ] && break
+        template=$(pveam list "$TEMPLATE_STORAGE" 2>/dev/null | awk '{print $1}' | sed 's#.*/##' | grep "^${series}_" | sort -V | tail -1 || true)
+        [ -n "$template" ] && break
+    done
+    [ -n "$template" ] || die "no Debian 12/13 template found"
+    if ! pveam list "$TEMPLATE_STORAGE" | grep -q "$template"; then
+        info "downloading $template"
+        pveam download "$TEMPLATE_STORAGE" "$template"
+    fi
+    local net="name=eth0,bridge=$BRIDGE,ip=$IP"
+    [ -n "$GW" ] && net="$net,gw=$GW"
+    [ -n "$VLAN" ] && net="$net,tag=$VLAN"
+    local args=(
+        --hostname "$CT_HOSTNAME" --ostype debian --unprivileged 1 --features nesting=1
+        --cores "$CORES" --memory "$MEMORY" --swap 512
+        --rootfs "$STORAGE:$DISK" --net0 "$net" --onboot 1
+        # not "proxlb": that tag marks the anchor VM the web interface reads
+        --tags "plb_ignore_vm;proxlb-host" --timezone host
+        --description "ProxLB host - runs ProxLB and proxlb-agent. The status is in the anchor VM (tag proxlb)."
+    )
+    [ -n "$DNS" ] && args+=(--nameserver "$DNS")
+    info "creating LXC $NEW_CTID ($CT_HOSTNAME) on $STORAGE from $template"
+    pct create "$NEW_CTID" "$TEMPLATE_STORAGE:vztmpl/$template" "${args[@]}"
+    pct start "$NEW_CTID"
+    # name to resolve as network check (set PROXLB_NET_CHECK_HOST for a local mirror)
+    local check="${PROXLB_NET_CHECK_HOST:-deb.debian.org}" _i
+    info "waiting for network in LXC $NEW_CTID"
+    for _i in $(seq 1 60); do
+        pct exec "$NEW_CTID" -- getent hosts "$check" >/dev/null 2>&1 && break
+        sleep 2
+    done
+    pct exec "$NEW_CTID" -- getent hosts "$check" >/dev/null 2>&1 \
+        || die "LXC $NEW_CTID has no network/DNS - check --ip/--gw/--bridge (the container stays for debugging)"
+    TARGET_CT="$NEW_CTID"
+}
+[ "$CREATE_CT" -eq 1 ] && create_ct
 
 # ------------------------------------------------- check the target first ---
 CT_NODE=""
@@ -301,6 +402,17 @@ if [ -n "$TARGET_CT" ] || [ -n "$TARGET_SSH" ]; then
     info "removed $BUNDLE - it is not needed any more"
 fi
 
+# a new LXC host also gets Proxmox HA (shared storage or ZFS replication)
+if [ "$CREATE_CT" -eq 1 ] && [ "$HA" != "no" ] && [ "${NODES:-1}" -ge 2 ]; then
+    LXC_SCRIPT=""
+    if [ -x /usr/sbin/proxlb-lxc ]; then LXC_SCRIPT=/usr/sbin/proxlb-lxc
+    elif [ -f "$SCRIPT_DIR/proxlb-lxc.sh" ]; then LXC_SCRIPT="$SCRIPT_DIR/proxlb-lxc.sh"; fi
+    if [ -n "$LXC_SCRIPT" ]; then
+        info "making LXC $TARGET_CT highly available"
+        bash "$LXC_SCRIPT" --enable-ha "$TARGET_CT" || warn "HA for LXC $TARGET_CT failed - later: proxlb-lxc --enable-ha $TARGET_CT"
+    fi
+fi
+
 if [ -n "$CONNECTED" ]; then
     if [ -n "$TARGET_CT" ]; then
         LOGCMD="pct exec $TARGET_CT -- journalctl -u proxlb-agent -f"
@@ -312,6 +424,7 @@ if [ -n "$CONNECTED" ]; then
     cat <<EOF
 
 ${C_G}Done: ProxLB on $CONNECTED is connected to anchor VM $VMID.${C_0}
+$( [ "$CREATE_CT" -eq 1 ] && printf '\n  New ProxLB host   LXC %s (%s) on %s, storage %s, ip %s\n' "$TARGET_CT" "$CT_HOSTNAME" "$CT_NODE" "$STORAGE" "$IP" )
 
   Reload the web interface (Ctrl+F5): Datacenter -> ProxLB shows
   "ProxLB runs on <hostname of $CONNECTED>" within ~30 seconds.

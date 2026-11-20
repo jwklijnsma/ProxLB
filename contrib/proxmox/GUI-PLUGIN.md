@@ -245,7 +245,17 @@ Proxmox VE node:
 proxlb-external --ct 150                    # ProxLB runs in LXC 150 (any node)
 proxlb-external --ssh root@mgmt01           # ProxLB runs on mgmt01
 proxlb-external --vmid 138 --ct 150         # anchor VM 138 already exists: reuse it
+proxlb-external --create-ct --ip 192.168.1.60/24 --gw 192.168.1.1
+                                            # no host yet: create a new LXC for ProxLB too
 ```
+
+`--create-ct` makes a new unprivileged Debian 13 (or 12) container on this node.
+It has the same options as `proxlb-lxc`: `--ctid`, `--hostname`, `--storage`,
+`--bridge`, `--vlan`, `--ip`, `--gw`, `--dns`, `--cores`, `--memory`, `--disk`.
+It's tagged `plb_ignore_vm;proxlb-host`, never `proxlb`, because that tag marks the
+anchor VM. In a cluster it's also made HA, unless you pass `--no-ha`. Without a
+need for the anchor setup, `proxlb-lxc` is the simpler choice: its container
+holds the status itself.
 
 This creates (or reuses) the anchor VM and the token. It copies the ProxLB
 source and the bundle to the target, runs `install-agent.sh` there, and then
