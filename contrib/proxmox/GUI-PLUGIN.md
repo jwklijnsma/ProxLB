@@ -237,6 +237,40 @@ There's no ProxLB container in the cluster to hold the status, so a tiny
 The anchor VM uses **no storage and no RAM**. It's protected against deletion
 and HA-managed (state *stopped*), so it moves to a surviving node when its node fails.
 
+**Quick way: everything in one command.** If ProxLB runs in an **LXC container of
+this cluster**, or on a machine you can reach **over SSH as root**, run this on one
+Proxmox VE node:
+
+```bash
+proxlb-external --ct 150                    # ProxLB runs in LXC 150 (any node)
+proxlb-external --ssh root@mgmt01           # ProxLB runs on mgmt01
+proxlb-external --vmid 138 --ct 150         # anchor VM 138 already exists: reuse it
+proxlb-external --create-ct --ip 192.168.1.60/24 --gw 192.168.1.1
+                                            # no host yet: create a new LXC for ProxLB too
+```
+
+`--create-ct` makes a new unprivileged Debian 13 (or 12) container on this node.
+It has the same options as `proxlb-lxc`: `--ctid`, `--hostname`, `--storage`,
+`--bridge`, `--vlan`, `--ip`, `--gw`, `--dns`, `--cores`, `--memory`, `--disk`.
+It's tagged `plb_ignore_vm;proxlb-host`, never `proxlb`, because that tag marks the
+anchor VM. In a cluster it's also made HA, unless you pass `--no-ha`. Without a
+need for the anchor setup, `proxlb-lxc` is the simpler choice: its container
+holds the status itself.
+
+This creates (or reuses) the anchor VM and the token. It copies the ProxLB
+source and the bundle to the target, runs `install-agent.sh` there, and then
+deletes the bundle on both sides. With `--ct`, the container is also tagged
+`plb_ignore_vm`, so ProxLB never migrates the container it runs in. For a
+container on another node, it goes through that node over the cluster's root
+SSH. The container must be running and have `python3` (Debian/Ubuntu/RHEL). Missing
+packages such as `python3-venv` are installed automatically. Continue with step 4.
+
+> Reusing an anchor: if its bundle `/root/proxlb-external-<VMID>.tar` is still
+> there, it's used as is. Otherwise a new token is made, and an agent that used the
+> old token elsewhere stops working.
+
+**By hand, step by step:**
+
 **1. On one Proxmox VE node** (as root), create the anchor VM, the API token and the bundle:
 
 ```bash
@@ -276,7 +310,7 @@ shows **"ProxLB runs on mgmt01 - external"**.
 Requirements and notes:
 - **Network:** the ProxLB machine must reach every node on **TCP 8006**. Nothing has to connect *to* the ProxLB machine.
 - **Node failure:** the agent tries every node in `proxmox_api.hosts`, so it keeps working when one node is down.
-- **New token** (e.g. after a leak): `proxlb-external --rotate-token --vmid <VMID>`, then run `install-agent.sh --bundle ...` again.
+- **New token** (e.g. after a leak): `proxlb-external --rotate-token --vmid <VMID>`, then run `install-agent.sh --bundle ...` again. With `--ct <CTID>` or `--ssh <host>` added, it does both steps in one go.
 - **Remove the agent:** `install-agent.sh --uninstall` turns `proxlb.service` back on. Then remove the anchor VM: `qm set <VMID> --protection 0 && ha-manager remove vm:<VMID> && qm destroy <VMID>`.
 
 > **About TLS and older clusters.** Proxmox root CAs created before

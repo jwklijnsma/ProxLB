@@ -85,6 +85,27 @@ done
 [[ "${B[PROXLB_VMID]}" =~ ^[0-9]+$ ]] || die "bad VMID in bundle"
 info "connecting to cluster '${B[PROXLB_CLUSTER]:-?}' (anchor VM ${B[PROXLB_VMID]}, hosts ${B[PROXLB_API_HOSTS]})"
 
+# ------------------------------------------------- base packages (fresh LXC) ---
+pkg_install() { # install packages with the system package manager, if there is one
+    if command -v apt-get >/dev/null; then
+        DEBIAN_FRONTEND=noninteractive apt-get update -qq
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@" >/dev/null
+    elif command -v dnf >/dev/null; then
+        dnf install -y -q "$@"
+    elif command -v yum >/dev/null; then
+        yum install -y -q "$@"
+    else
+        return 1
+    fi
+}
+NEED=()
+command -v python3 >/dev/null || NEED+=(python3)
+command -v update-ca-certificates >/dev/null || command -v update-ca-trust >/dev/null || NEED+=(ca-certificates)
+if [ ${#NEED[@]} -gt 0 ]; then
+    info "installing ${NEED[*]}"
+    pkg_install "${NEED[@]}" || die "please install ${NEED[*]} first"
+fi
+
 # ------------------------------------------------------------- cluster CA ---
 if [ -d /usr/local/share/ca-certificates ] && command -v update-ca-certificates >/dev/null; then
     install -m 0644 "$TMP/pve-root-ca.pem" /usr/local/share/ca-certificates/proxlb-pve-root-ca.crt
@@ -110,8 +131,12 @@ if [ -z "$PY" ]; then
 fi
 if [ -z "$PY" ]; then
     info "ProxLB not found - installing it into /opt/proxlb/venv"
-    command -v python3 >/dev/null || die "python3 is required"
-    python3 -m venv /opt/proxlb/venv || die "python3 venv module missing (Debian: apt install python3-venv)"
+    if ! python3 -m venv /opt/proxlb/venv >/dev/null 2>&1; then
+        rm -rf /opt/proxlb/venv
+        info "installing python3-venv"
+        pkg_install python3-venv || true
+        python3 -m venv /opt/proxlb/venv || die "python3 venv module missing (Debian: apt install python3-venv)"
+    fi
     /opt/proxlb/venv/bin/pip install --quiet --upgrade pip
     if [ -f "$REPO_ROOT/setup.py" ] && [ -d "$REPO_ROOT/proxlb" ]; then
         /opt/proxlb/venv/bin/pip install --quiet "$REPO_ROOT"
