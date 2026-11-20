@@ -58,8 +58,10 @@ if (degraded) {
   resources.push({ type: 'qemu', vmid: 112, node: 'pve2', status: 'running', hastate: 'recovery' });
 }
 const ctTags = 'proxlb;plb_ignore_vm;proxlb-active';
+// ?norun : anchor VM exists, but the agent has not reported yet (empty Notes)
+const norun = location.search.indexOf('norun') !== -1;
 // ?external : ProxLB runs on another machine, status via an anchor VM
-if (location.search.indexOf('external') !== -1) {
+if (location.search.indexOf('external') !== -1 || norun) {
   const i = resources.findIndex((r) => r.vmid === 120);
   resources[i] = { type: 'qemu', vmid: 9000, node: 'pve3', name: 'proxlb-anchor', status: 'stopped',
     hastate: 'stopped', tags: ctTags };
@@ -79,7 +81,7 @@ window.Proxmox = { Utils: { API2Request: function(opts) {
     } else if (/\/config$/.test(opts.url)) {
       opts.success({ result: { data: {
         tags: ctTags, digest: 'x',
-        description: 'ProxLB\n<!--proxlb-status:' + JSON.stringify(status) + '-->',
+        description: norun ? '' : 'ProxLB\n<!--proxlb-status:' + JSON.stringify(status) + '-->',
       } } });
     }
   }, 10);
