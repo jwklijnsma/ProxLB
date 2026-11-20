@@ -163,16 +163,20 @@ create_ct() {
         else STORAGE=$(echo "$storages" | head -1); fi
         [ -n "$STORAGE" ] || die "no storage for containers found, use --storage"
     fi
-    info "looking for a Debian template"
+    # The template list has amd64 and arm64 images under the same name - only
+    # take the host's own architecture (arm64 on x86: "Exec format error").
+    local HOST_ARCH
+    HOST_ARCH=$(dpkg --print-architecture 2>/dev/null || echo amd64)
+    info "looking for a Debian template ($HOST_ARCH)"
     pveam update >/dev/null 2>&1 || warn "pveam update failed, using the cached template list"
     local template="" series
     for series in debian-13-standard debian-12-standard; do
-        template=$(pveam available --section system 2>/dev/null | awk '{print $2}' | grep "^${series}_" | sort -V | tail -1 || true)
+        template=$(pveam available --section system 2>/dev/null | awk '{print $2}' | grep "^${series}_.*_${HOST_ARCH}\.tar" | sort -V | tail -1 || true)
         [ -n "$template" ] && break
-        template=$(pveam list "$TEMPLATE_STORAGE" 2>/dev/null | awk '{print $1}' | sed 's#.*/##' | grep "^${series}_" | sort -V | tail -1 || true)
+        template=$(pveam list "$TEMPLATE_STORAGE" 2>/dev/null | awk '{print $1}' | sed 's#.*/##' | grep "^${series}_.*_${HOST_ARCH}\.tar" | sort -V | tail -1 || true)
         [ -n "$template" ] && break
     done
-    [ -n "$template" ] || die "no Debian 12/13 template found"
+    [ -n "$template" ] || die "no Debian 12/13 template for $HOST_ARCH found"
     if ! pveam list "$TEMPLATE_STORAGE" | grep -q "$template"; then
         info "downloading $template"
         pveam download "$TEMPLATE_STORAGE" "$template"
@@ -191,7 +195,9 @@ create_ct() {
     [ -n "$DNS" ] && args+=(--nameserver "$DNS")
     info "creating LXC $NEW_CTID ($CT_HOSTNAME) on $STORAGE from $template"
     pct create "$NEW_CTID" "$TEMPLATE_STORAGE:vztmpl/$template" "${args[@]}"
-    pct start "$NEW_CTID"
+    pct start "$NEW_CTID" || die "LXC $NEW_CTID was created but does not start. See why with:
+    pct start $NEW_CTID --debug 2>&1 | grep -E 'ERROR|error'
+  remove it with: pct destroy $NEW_CTID   (nothing else was changed yet)"
     # name to resolve as network check (set PROXLB_NET_CHECK_HOST for a local mirror)
     local check="${PROXLB_NET_CHECK_HOST:-deb.debian.org}" _i
     info "waiting for network in LXC $NEW_CTID"

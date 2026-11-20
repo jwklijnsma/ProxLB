@@ -62,8 +62,9 @@ done
 cat > "$WORK/bin/pveam" <<'EOF'
 #!/bin/bash
 case "$1" in
-  available) printf 'system          debian-12-standard_12.12-1_amd64.tar.zst\nsystem          debian-13-standard_13.1-2_amd64.tar.zst\n' ;;
-  list) echo "local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst 123MB" ;;
+  # both architectures under the same name; the arm64 one sorts last and is newer
+  available) printf 'system          debian-12-standard_12.12-1_amd64.tar.zst\nsystem          debian-13-standard_13.1-2_amd64.tar.zst\nsystem          debian-13-standard_13.6-1_arm64.tar.zst\nsystem          debian-13-standard_13.6-1_amd64.tar.zst\n' ;;
+  list) echo "local:vztmpl/debian-13-standard_13.6-1_amd64.tar.zst 123MB" ;;
 esac
 exit 0
 EOF
@@ -150,7 +151,9 @@ bash "$EXT" --vmid 138 --rotate-token --no-gui > /dev/null 2>&1 || fail "--rotat
 PROXLB_NET_CHECK_HOST=localhost bash "$EXT" --vmid 138 --create-ct --ip 10.0.0.60/24 --gw 10.0.0.1 \
     > "$WORK/run3.log" 2>&1 || { cat "$WORK/run3.log"; fail "--create-ct"; }
 create=$(grep "^pct create" "$LOG") || fail "no pct create"
-grep -q "^pct create 301 local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst " <<<"$create" || fail "template/ctid: $create"
+HOST_ARCH=$(dpkg --print-architecture)
+grep -q "^pct create 301 local:vztmpl/debian-13-standard_13.6-1_${HOST_ARCH}.tar.zst " <<<"$create" \
+    || fail "template/ctid (must match the host architecture $HOST_ARCH): $create"
 grep -q -- "--tags plb_ignore_vm;proxlb-host " <<<"$create" || fail "tags: $create"
 grep -q -- "--tags proxlb;" <<<"$create" && fail "new host must not carry the anchor tag 'proxlb'"
 grep -q -- "--rootfs local-lvm:6 " <<<"$create" || fail "storage: $create"
@@ -162,7 +165,7 @@ grep -q "^pvesh set /nodes/pve1/lxc/301/config" "$LOG" && fail "tags changed alt
 grep -q "^qm create" "$LOG" && fail "anchor VM created again"
 grep -q "New ProxLB host   LXC 301 (proxlb)" "$WORK/run3.log" || fail "summary"
 [ ! -e /root/proxlb-external-138.tar ] || fail "bundle left on the host"
-pass "new unprivileged Debian 13 LXC 301 (tags plb_ignore_vm;proxlb-host) created, started and connected to anchor 138"
+pass "template for the host architecture ($HOST_ARCH, not the newer-sorting other arch); new unprivileged Debian 13 LXC 301 (tags plb_ignore_vm;proxlb-host) created, started and connected to anchor 138"
 
 bash "$ROOT/contrib/proxmox/agent/install-agent.sh" --uninstall >/dev/null
 echo "ALL TESTS PASSED"
