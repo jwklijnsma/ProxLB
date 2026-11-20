@@ -86,11 +86,13 @@ patch_tpl() {
 }
 
 restart_proxy() {
-    # pveproxy indexes /pve2/js at start, so a restart is needed for a new file
+    # pveproxy indexes /pve2/js when it starts. A reload re-executes it gracefully
+    # (as pve-manager's own updates do): open connections - including the web
+    # shell this may be running in - are not cut off, unlike a restart.
     if [ -d /run/systemd/system ] && systemctl cat pveproxy.service >/dev/null 2>&1; then
-        systemctl restart pveproxy.service || msg "WARNING: could not restart pveproxy"
+        systemctl reload-or-restart pveproxy.service || msg "WARNING: could not reload pveproxy"
     else
-        msg "pveproxy not running here - restart it yourself: systemctl restart pveproxy"
+        msg "pveproxy not running here - reload it yourself: systemctl reload pveproxy"
     fi
 }
 

@@ -1,0 +1,2 @@
+Fixed:
+  - Installing or updating the web-interface plugin (proxlb-pve package, proxlb-gui, proxlb-lxc, proxlb-external) restarted pveproxy, which cut off the Proxmox web shell it was run from and could interrupt the package setup; pveproxy is now reloaded gracefully, as pve-manager does.
