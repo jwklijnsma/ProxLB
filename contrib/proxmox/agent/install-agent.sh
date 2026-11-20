@@ -261,8 +261,14 @@ if command -v docker >/dev/null && docker ps --format '{{.Image}} {{.Names}}' 2>
 fi
 
 systemctl daemon-reload
-systemctl enable --now proxlb-agent.service
+systemctl enable proxlb-agent.service
+# restart, not just start: an agent that is already running must pick up the new token
+systemctl restart proxlb-agent.service
 sleep 5
+info "self-check (proxlb-ctl check):"
+if ! REQUESTS_CA_BUNDLE="$CA_BUNDLE" "$PY" "$AGENT_DIR/proxlb-agent.py" --check -c /etc/proxlb/agent.yaml; then
+    warn "the self-check found problems (see the -> hints above) - the web interface will show 'waiting for agent' until they are fixed"
+fi
 if systemctl is-active --quiet proxlb-agent.service; then
     info "proxlb-agent is running. Follow it with: journalctl -u proxlb-agent -f"
     info "Within ~30 s the Proxmox web interface shows Datacenter -> ProxLB: 'ProxLB runs on $(hostname)'."

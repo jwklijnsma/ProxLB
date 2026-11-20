@@ -166,6 +166,24 @@ test('buttons need a live agent', () => {
     assert.strictEqual(fresh.btnPreview.disabled, true);
 });
 
+test('no run yet: no fake verdict, threshold or "balanced" claim', () => {
+    const { classes } = loadPlugin();
+    const anchor = { type: 'qemu', vmid: 1000, node: 'node04', status: 'stopped', name: 'proxlb-anchor', hastate: 'stopped' };
+    const me = makeView(classes, { ct: anchor, status: null, ctTags: ['proxlb', 'proxlb-active'] });
+    me.status = {};
+    let emptyText = null;
+    me.down = () => ({ setTitle(t) { me.movesTitle = t; }, getView: () => ({ emptyText: '', refresh() { emptyText = this.emptyText; } }) });
+    me.render_();
+    const s = text(me.summary.html);
+    assert.match(s, /waiting for agent/);
+    assert.match(s, /No run yet .* proxlb-ctl check/);
+    assert.match(s, /Cluster: unknown/);
+    assert.match(s, /threshold known after the first run/);
+    assert.doesNotMatch(s, /imbalanced|threshold 10/);
+    assert.strictEqual(me.movesTitle, 'Migrations of the last run');
+    assert.match(emptyText, /No run yet/);
+});
+
 test('plugin source is not strict mode (ExtJS callParent needs fn.caller)', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'proxlb-gui.js'), 'utf8');
     assert.ok(!/^\s*['"]use strict['"]/m.test(src));

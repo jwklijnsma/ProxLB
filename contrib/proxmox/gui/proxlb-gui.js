@@ -24,7 +24,7 @@
     }
 
     const PLB = {
-        VERSION: '1.2.0',
+        VERSION: '1.3.0',
         TAG_CT: 'proxlb',
         TAG_ACTIVE: 'proxlb-active',
         TAG_CMD_DRYRUN: 'proxlb-cmd-dryrun',
@@ -363,7 +363,9 @@
                 .map((n) => [n.mem, n.cpu, n.disk][idx])
                 .filter((v) => v !== null && v !== undefined);
             let spread = values.length > 1 ? Math.max(...values) - Math.min(...values) : 0;
-            let balanciness = st.balanciness !== undefined ? st.balanciness : 10;
+            // nothing reported yet: no threshold, no verdict, no "balanced" claims
+            let hasRun = !!st.finished;
+            let balanciness = st.balanciness;
 
             // ---- moves -------------------------------------------------------
             me.moveStore.loadData((st.moves || []).map((m) => ({
@@ -371,13 +373,21 @@
             })));
             let movesGrid = me.down('#moves');
             if (movesGrid) {
-                let title = st.dry_run ? gettext('Planned migrations (preview of last run)')
-                    : gettext('Migrations performed by last run');
+                let title = !hasRun ? gettext('Migrations of the last run')
+                    : st.dry_run ? gettext('Planned migrations (preview of last run)')
+                        : gettext('Migrations performed by last run');
                 if (st.moves_total > (st.moves || []).length) {
                     title += ' - ' + Ext.String.format(gettext('showing {0} of {1}'),
                         (st.moves || []).length, st.moves_total);
                 }
                 movesGrid.setTitle(title);
+                let view = movesGrid.getView ? movesGrid.getView() : null;
+                let empty = hasRun ? gettext('No migrations - the cluster is balanced.')
+                    : gettext('No run yet - nothing to show until the agent reports.');
+                if (view && view.emptyText !== empty) {
+                    view.emptyText = empty;
+                    view.refresh();
+                }
             }
 
             // ---- summary -----------------------------------------------------
@@ -416,7 +426,9 @@
                     lines[lines.length - 1] += ' <span style="opacity:0.7">(' +
                         gettext('survive a node failure:') + ' <code>' + haHint + '</code>)</span>';
                 }
-                lines.push('<b>' + gettext('Cluster') + ':</b> ' + (st.paused
+                lines.push('<b>' + gettext('Cluster') + ':</b> ' + (!st.hb
+                    ? PLB.badge(gettext('unknown'), '#777') + ' ' + gettext('(reported by the agent)')
+                    : st.paused
                     ? PLB.badge(gettext('degraded'), '#d9534f') + ' ' +
                       gettext('real balancing paused until the cluster is healthy') + ' - ' + Ext.htmlEncode(st.paused)
                     : PLB.badge(gettext('healthy'), '#5cb85c')));
@@ -428,6 +440,11 @@
                         ' (' + gettext('started') + ' ' + PLB.ago(st.started) + ')';
                 } else if (!st.finished) {
                     result = gettext('No run yet');
+                    if (!st.hb) {
+                        result += ' &middot; ' + gettext('the agent has not reported - on the ProxLB machine run') +
+                            ' <code>proxlb-ctl check</code>' +
+                            (external ? '' : ' (<code>pct exec ' + ct.vmid + ' -- proxlb-ctl check</code>)');
+                    }
                 } else if (st.ok) {
                     result = PLB.badge('OK', '#5cb85c') + ' ' + st.moves_total + ' ' +
                         (st.dry_run ? gettext('migration(s) planned') : gettext('migration(s) performed')) +
@@ -451,12 +468,18 @@
                           gettext('scheduled runs only preview (dry-run)')) +
                     ' &middot; ' + gettext('next run') + ' ' + PLB.fmtTime(st.next_run));
 
-                let balanced = spread <= balanciness;
-                lines.push('<b>' + gettext('Balance') + ' (' + Ext.htmlEncode(method) + '):</b> ' +
-                    (balanced ? PLB.badge(gettext('balanced'), '#5cb85c')
-                        : PLB.badge(gettext('imbalanced'), '#f0ad4e')) + ' ' +
-                    gettext('spread between nodes') + ' ' + spread.toFixed(1) + ' % (' +
-                    gettext('threshold') + ' ' + balanciness + ' %, mode ' + Ext.htmlEncode(st.mode || '-') + ')');
+                if (balanciness === undefined) {
+                    lines.push('<b>' + gettext('Balance') + ' (' + Ext.htmlEncode(method) + '):</b> ' +
+                        gettext('spread between nodes') + ' ' + spread.toFixed(1) + ' % (' +
+                        gettext('threshold known after the first run') + ')');
+                } else {
+                    let balanced = spread <= balanciness;
+                    lines.push('<b>' + gettext('Balance') + ' (' + Ext.htmlEncode(method) + '):</b> ' +
+                        (balanced ? PLB.badge(gettext('balanced'), '#5cb85c')
+                            : PLB.badge(gettext('imbalanced'), '#f0ad4e')) + ' ' +
+                        gettext('spread between nodes') + ' ' + spread.toFixed(1) + ' % (' +
+                        gettext('threshold') + ' ' + balanciness + ' %, mode ' + Ext.htmlEncode(st.mode || '-') + ')');
+                }
             }
             me.summary.setHtml(lines.join('<br>'));
 

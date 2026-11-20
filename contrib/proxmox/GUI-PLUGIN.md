@@ -369,6 +369,17 @@ allow the tags `proxlb-cmd-dryrun`, `proxlb-cmd-run` and `proxlb-active` for the
 
 ## Troubleshooting
 
+**Start here:** run the self-check where the agent runs. It tests the config, the network and
+TLS to every node, the token, the status guest and the permissions, and prints a fix for each problem:
+
+```bash
+pct exec <CTID> -- proxlb-ctl check        # ProxLB in a container
+proxlb-ctl check                            # on the ProxLB machine itself
+```
+
+`install-agent.sh` runs the same check at the end of every installation.
+
+
 | The tab shows ... | Cause / fix |
 |---|---|
 | **no ProxLB entry** under Datacenter | The plugin is not loaded on *this* node. Check `grep proxlb-gui /usr/share/pve-manager/index.html.tpl`, then `Ctrl+F5`. Re-apply with `proxlb-gui --reapply` (package) or `bash install-gui.sh`. You also need `Sys.Audit` on `/`. |
@@ -379,6 +390,7 @@ allow the tags `proxlb-cmd-dryrun`, `proxlb-cmd-run` and `proxlb-active` for the
 | **command queued** that never finishes | The agent doesn't pick up tags: it's stopped, or it watches another CTID (`ctid:` in `/etc/proxlb/agent.yaml`). |
 | **Rebalance now** greyed out | The cluster is degraded (node offline or HA recovering), so balancing is paused on purpose. Or a run is in progress. |
 | buttons give **permission denied** | The user lacks `VM.Config.Options` on `/vms/<CTID>`, or tags are restricted ([see above](#who-may-see-and-use-the-tab)). |
+| agent log: **401 Unauthorized** / **API login rejected** | The token in `proxlb.yaml` isn't valid any more. This happens if `proxlb-external` ran again and replaced the token. Create a new one and install it: `proxlb-external --rotate-token --vmid <anchor> --ct <CTID>` (or `--ssh <host>`). The agent picks up the new token by itself. |
 | **waiting for agent** | The guest is found but the agent never reported. Check that the agent is running. For another machine, check TCP 8006 to the nodes and the token. |
 | agent log: **CA cert does not include key usage extension** | Old Proxmox CA (bug #6701) and `tls_relax_x509_strict: false`. Remove that line, or create a new cluster CA. |
 | agent log: **certificate verify failed** (other reasons) | The cluster CA isn't trusted on that machine. Run `install-agent.sh --bundle` again, or copy `/etc/pve/pve-root-ca.pem` into the system CA store. |

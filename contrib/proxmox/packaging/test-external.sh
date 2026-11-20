@@ -62,7 +62,9 @@ class H(BaseHTTPRequestHandler):
         self.send_response(code); self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
     def authed(self):
-        if self.headers.get("Authorization") != TOKEN:
+        import os
+        accepted = open("token").read().strip() if os.path.exists("token") else TOKEN
+        if self.headers.get("Authorization") != accepted:
             self.reply(401, None); return False
         return True
     def do_GET(self):
@@ -77,6 +79,16 @@ class H(BaseHTTPRequestHandler):
                 {"type": "qemu", "vmid": 9000, "node": "pve2", "status": "stopped",
                  "name": "proxlb-anchor", "tags": state["tags"], "hastate": "stopped"},
             ])
+        elif p == "/api2/json/access/permissions":
+            path = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("path", ["/"])[0]
+            if path == "/":
+                self.reply(200, {"/": {"Sys.Audit": 1, "VM.Audit": 1, "VM.Migrate": 1, "Datastore.Audit": 1}})
+            else:
+                import os
+                self.reply(200, {path: {} if os.path.exists("noperm") else {"VM.Config.Options": 1}})
+        elif p == "/api2/json/_settags":
+            state["tags"] = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)["tags"][0]
+            self.reply(200, None)
         elif p == "/api2/json/_state":
             self.reply(200, state)
         else:
@@ -135,7 +147,8 @@ ls /etc/proxlb/proxlb.yaml.bak-* >/dev/null || fail "no backup of the old config
 grep -q "ExecStart=$PY /opt/proxlb/agent/proxlb-agent.py -c /etc/proxlb/agent.yaml" /etc/systemd/system/proxlb-agent.service || fail "unit ExecStart"
 CA_BUNDLE=$(sed -n 's/^Environment="REQUESTS_CA_BUNDLE=\(.*\)"/\1/p' /etc/systemd/system/proxlb-agent.service)
 grep -q "$(sed -n 2p pve-root-ca.pem)" "$CA_BUNDLE" || fail "cluster CA not in $CA_BUNDLE"
-grep -q "enable --now proxlb-agent.service" systemctl.log || fail "agent service not enabled"
+grep -q "enable proxlb-agent.service" systemctl.log && grep -q "restart proxlb-agent.service" systemctl.log \
+    || fail "agent service not enabled + restarted"
 pass "install-agent.sh: agent.yaml, proxlb.yaml (backup, settings kept), CA, unit"
 
 echo "== TLS: old Proxmox CA without keyUsage (PVE bug #6701)"
@@ -198,6 +211,40 @@ assert st["moves"] == [[101, "web", "vm", "pve1", "pve2"]], st["moves"]
 print("published status:", {k: st[k] for k in ("host", "trigger", "moves_total", "ok")})
 PYEOF
 pass "agent connected over verified TLS with the token, took the GUI command and published the status"
+
+echo "== token replaced on the cluster -> 401, then new token in proxlb.yaml -> agent recovers without restart"
+NEW="PVEAPIToken=proxlb@pve!external9000=new-secret"
+echo "$NEW" > "$WORK/token"                                   # the cluster only accepts the new token now
+curl -s --cacert pve-root-ca.pem -H "Authorization: $NEW" -o /dev/null \
+    "https://127.0.0.1:$PORT/api2/json/_settags?tags=proxlb;plb_ignore_vm;proxlb-cmd-dryrun"
+for _ in $(seq 1 30); do grep -q "API login rejected" agent.log && break; sleep 1; done
+grep -q "API login rejected by 127.0.0.1:$PORT (401): the token proxlb@pve!external9000" agent.log \
+    || fail "no clear 401 message"
+"$PY" - <<'PYEOF'
+import yaml
+c = yaml.safe_load(open("/etc/proxlb/proxlb.yaml"))
+c["proxmox_api"]["token_secret"] = "new-secret"
+yaml.safe_dump(c, open("/etc/proxlb/proxlb.yaml", "w"), sort_keys=False)
+PYEOF
+for _ in $(seq 1 40); do
+    st=$(curl -s --cacert pve-root-ca.pem -H "Authorization: $NEW" "https://127.0.0.1:$PORT/api2/json/_state")
+    grep -q "proxlb-cmd-dryrun" <<<"$st" || break
+    sleep 1
+done
+grep -q "proxlb-cmd-dryrun" <<<"$st" && fail "agent did not recover with the new token"
+grep -q "proxmox_api in /etc/proxlb/proxlb.yaml changed - reconnecting" agent.log || fail "no reconnect message"
+pass "401 reported once with a hint; new token in proxlb.yaml picked up without restart, GUI command handled"
+
+echo "== proxlb-ctl check (self-check)"
+chk=$(REQUESTS_CA_BUNDLE="$CA_BUNDLE" "$PY" /opt/proxlb/agent/proxlb-agent.py --check -c /etc/proxlb/agent.yaml 2>&1) || { echo "$chk"; fail "check should pass"; }
+grep -q "all checks passed" <<<"$chk" || fail "check summary: $chk"
+grep -q "TLS verified" <<<"$chk" && grep -q "qemu 9000 found on node pve2" <<<"$chk" || fail "check details: $chk"
+touch "$WORK/noperm"
+chk=$(REQUESTS_CA_BUNDLE="$CA_BUNDLE" "$PY" /opt/proxlb/agent/proxlb-agent.py --check -c /etc/proxlb/agent.yaml 2>&1) && fail "check should fail without VM.Config.Options"
+grep -q "VM.Config.Options on /vms/9000 .*MISSING" <<<"$chk" || fail "missing-permission line: $chk"
+grep -q "pveum acl modify /vms/9000 --users proxlb@pve --roles ProxLBAgent" <<<"$chk" || fail "hint: $chk"
+rm -f "$WORK/noperm"
+pass "proxlb-ctl check: all OK with permissions, names the missing VM.Config.Options with the fix"
 
 echo "== uninstall"
 bash "$ROOT/contrib/proxmox/agent/install-agent.sh" --uninstall >/dev/null
