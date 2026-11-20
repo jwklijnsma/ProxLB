@@ -361,16 +361,19 @@ fi
 info "API hosts: $API_HOSTS"
 
 # ---------------------------------------------------------------- template ---
-info "looking for a Debian template"
+# The template list has amd64 and arm64 images under the same name - only take
+# the host's own architecture (an arm64 rootfs on x86 fails with "Exec format error").
+HOST_ARCH=$(dpkg --print-architecture 2>/dev/null || echo amd64)
+info "looking for a Debian template ($HOST_ARCH)"
 pveam update >/dev/null 2>&1 || warn "pveam update failed, using the cached template list"
 TEMPLATE=""
 for series in debian-13-standard debian-12-standard; do
-    TEMPLATE=$(pveam available --section system 2>/dev/null | awk '{print $2}' | grep "^${series}_" | sort -V | tail -1 || true)
+    TEMPLATE=$(pveam available --section system 2>/dev/null | awk '{print $2}' | grep "^${series}_.*_${HOST_ARCH}\.tar" | sort -V | tail -1 || true)
     [ -n "$TEMPLATE" ] && break
-    TEMPLATE=$(pveam list "$TEMPLATE_STORAGE" 2>/dev/null | awk '{print $1}' | sed 's#.*/##' | grep "^${series}_" | sort -V | tail -1 || true)
+    TEMPLATE=$(pveam list "$TEMPLATE_STORAGE" 2>/dev/null | awk '{print $1}' | sed 's#.*/##' | grep "^${series}_.*_${HOST_ARCH}\.tar" | sort -V | tail -1 || true)
     [ -n "$TEMPLATE" ] && break
 done
-[ -n "$TEMPLATE" ] || die "no Debian 12/13 template found"
+[ -n "$TEMPLATE" ] || die "no Debian 12/13 template for $HOST_ARCH found"
 if ! pveam list "$TEMPLATE_STORAGE" | grep -q "$TEMPLATE"; then
     info "downloading $TEMPLATE"
     pveam download "$TEMPLATE_STORAGE" "$TEMPLATE"
@@ -394,7 +397,9 @@ CREATE_ARGS=(
 [ -n "$DNS" ] && CREATE_ARGS+=(--nameserver "$DNS")
 pct create "$CTID" "$TEMPLATE_STORAGE:vztmpl/$TEMPLATE" "${CREATE_ARGS[@]}"
 pveum acl modify "/vms/$CTID" --users "$PVE_USER" --roles ProxLBAgent
-pct start "$CTID"
+pct start "$CTID" || die "container $CTID was created but does not start. See why with:
+    pct start $CTID --debug 2>&1 | grep -E 'ERROR|error'
+  remove it with: pct destroy $CTID"
 
 info "waiting for network in the container"
 for _ in $(seq 1 60); do

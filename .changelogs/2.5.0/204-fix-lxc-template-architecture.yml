@@ -1,0 +1,2 @@
+Fixed:
+  - proxlb-lxc and proxlb-external --create-ct picked the arm64 Debian template on x86 hosts (both architectures share one name in the template list and arm64 sorts last), so the container failed to start with "sync_wait ... expected sequence number 7" / "Exec format error". Only templates for the host architecture are used now, and a container that does not start shows how to debug and remove it.
