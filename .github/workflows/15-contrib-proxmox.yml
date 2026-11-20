@@ -95,6 +95,10 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/src:ro" debian:${{ matrix.debian }} \
             bash -c 'cp -r /src /tmp/repo && bash /tmp/repo/contrib/proxmox/packaging/test-external-ct.sh'
+      - name: proxlb-lxc --enable-ha (rbd, ZFS replication, local storage) with stubbed Proxmox commands
+        run: |
+          docker run --rm -v "$PWD:/src:ro" debian:${{ matrix.debian }} \
+            bash -c 'cp -r /src /tmp/repo && bash /tmp/repo/contrib/proxmox/packaging/test-enable-ha.sh'
 
   bundle:
     name: Installer bundle

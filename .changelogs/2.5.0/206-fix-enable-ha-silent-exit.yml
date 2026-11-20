@@ -1,0 +1,2 @@
+Fixed:
+  - proxlb-lxc --enable-ha (also used by proxlb-external --create-ct) exited silently right after reading the storage type ("HA for LXC ... failed"), so no container was made HA; replication job numbers are also kept unique within one run.

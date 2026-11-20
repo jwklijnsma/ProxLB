@@ -219,7 +219,7 @@ install_gui() {
 SHARED_TYPES=" rbd cephfs nfs cifs glusterfs iscsi iscsidirect zfs "
 setup_ha() {
     [ "$HA" = "no" ] && return 0
-    local nodes count rootfs stype shared allowed ct_node others="" n i
+    local nodes count rootfs stype shared allowed ct_node others="" n i last_job=""
     nodes=$(pvesh get /cluster/status --output-format json | json_get '
         print join(" ", sort map { $_->{name} } grep { $_->{type} eq "node" } @$d)')
     count=$(echo "$nodes" | wc -w)
@@ -236,7 +236,7 @@ setup_ha() {
     rootfs=$(pvesh get "/nodes/$ct_node/lxc/$CTID/config" --output-format json | \
         json_get 'my ($s) = ($d->{rootfs} // "") =~ /^([^:]+):/; print $s // ""')
     read -r stype shared allowed < <(pvesh get "/storage/$rootfs" --output-format json | json_get '
-        print join(" ", $d->{type} // "", $d->{shared} ? 1 : 0, $d->{nodes} // "-")')
+        print join(" ", $d->{type} // "", $d->{shared} ? 1 : 0, $d->{nodes} // "-"), "\n"')
     [[ "$SHARED_TYPES" == *" $stype "* ]] && shared=1
 
     if [ "$shared" = "1" ]; then
@@ -263,6 +263,9 @@ setup_ha() {
                 if (grep { $_->{target} eq $ENV{PLB_NODE} } @j) { print "exists"; exit }
                 my %used = map { $_->{jobnum} => 1 } @j; my $i = 0; $i++ while $used{$i}; print $i')
             [ "$i" = "exists" ] && continue
+            # never reuse a job number of this run, even if the API is slow to list it
+            if [ -n "${last_job:-}" ] && [ "$i" -le "$last_job" ]; then i=$((last_job + 1)); fi
+            last_job=$i
             if pvesh create /cluster/replication --id "$CTID-$i" --type local --target "$n" \
                     --schedule "$REPL_SCHEDULE" --comment "ProxLB HA" >/dev/null; then
                 pvesh create "/nodes/$ct_node/replication/$CTID-$i/schedule_now" >/dev/null || true
