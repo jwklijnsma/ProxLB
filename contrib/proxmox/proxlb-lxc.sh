@@ -140,8 +140,9 @@ C_G=$'\e[32m'; C_Y=$'\e[33m'; C_R=$'\e[31m'; C_0=$'\e[0m'
 info() { echo "${C_G}[ProxLB]${C_0} $*"; }
 warn() { echo "${C_Y}[ProxLB] WARNING:${C_0} $*"; }
 die()  { echo "${C_R}[ProxLB] ERROR:${C_0} $*" >&2; exit 1; }
-ct()   { pct exec "$CTID" -- "$@"; }
-ctsh() { pct exec "$CTID" -- bash -ec "$1"; }
+# C.UTF-8 exists in every container (the caller's locale may not); never read stdin
+ct()   { pct exec "$CTID" -- env LC_ALL=C.UTF-8 LANG=C.UTF-8 LANGUAGE= "$@" </dev/null; }
+ctsh() { pct exec "$CTID" -- env LC_ALL=C.UTF-8 LANG=C.UTF-8 LANGUAGE= bash -ec "$1" </dev/null; }
 
 [ "$(id -u)" -eq 0 ] || die "run as root on a Proxmox VE node"
 command -v pct >/dev/null && command -v pveum >/dev/null || die "this is not a Proxmox VE node"
@@ -409,13 +410,14 @@ done
 ct getent hosts deb.debian.org >/dev/null 2>&1 || die "container $CTID has no network/DNS - check --ip/--gw/--bridge"
 
 info "installing packages in the container"
-ctsh "export DEBIAN_FRONTEND=noninteractive
+ctsh "export DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none NEEDRESTART_MODE=a
       apt-get update -qq
-      apt-get install -y -qq python3 python3-venv git ca-certificates nano >/dev/null"
+      apt-get install -y -qq -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
+          python3 python3-venv git ca-certificates nano >/dev/null"
 
 # Trust the cluster CA so TLS verification works against the node certificates
 pct push "$CTID" /etc/pve/pve-root-ca.pem /usr/local/share/ca-certificates/pve-root-ca.crt
-ct update-ca-certificates >/dev/null
+ct update-ca-certificates >/dev/null 2>&1
 
 deploy_source
 install_software

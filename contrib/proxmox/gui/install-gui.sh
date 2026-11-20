@@ -116,6 +116,12 @@ other_nodes() {
         for (@$d) { print "$_->{ip}\n" if $_->{type} eq "node" && !$_->{local} && $_->{online} && $_->{ip} }'
 }
 
+ssh_copy() { # $1 = host, $2 = local file, $3 = remote path
+    # ssh + cat instead of scp: scp of OpenSSH 9/10 (PVE 8/9) speaks SFTP and
+    # fails with "scp: Connection closed" where the SFTP subsystem is unusable
+    ssh -o BatchMode=yes "root@$1" "cat > '$3'" < "$2"
+}
+
 remote_has_package() {
     ssh -o BatchMode=yes "root@$1" "test -x $PKG_SELF" 2>/dev/null
 }
@@ -150,8 +156,8 @@ EOF
                     continue
                 fi
                 msg "installing on $ip"
-                scp -q -o BatchMode=yes "$SHARE_DIR/$JS_NAME" "root@$ip:/tmp/$JS_NAME" &&
-                scp -q -o BatchMode=yes "$SELF" "root@$ip:/tmp/proxlb-gui-install.sh" &&
+                ssh_copy "$ip" "$SHARE_DIR/$JS_NAME" "/tmp/$JS_NAME" &&
+                ssh_copy "$ip" "$SELF" /tmp/proxlb-gui-install.sh &&
                 ssh -o BatchMode=yes "root@$ip" "bash /tmp/proxlb-gui-install.sh --js /tmp/$JS_NAME; rc=\$?; rm -f /tmp/$JS_NAME /tmp/proxlb-gui-install.sh; exit \$rc" ||
                 msg "WARNING: failed on $ip"
             done

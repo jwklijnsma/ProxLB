@@ -1,0 +1,2 @@
+Fixed:
+  - GUI install on other nodes and proxlb-external --ct/--ssh failed with "scp: Connection closed" on PVE 9 nodes (scp speaks SFTP); files are now copied with ssh + cat. Commands in containers run with the C.UTF-8 locale (no perl/apt locale warnings), apt never waits for input (apt-listchanges pager, config prompts), and the long pip install step announces itself.
