@@ -45,6 +45,10 @@ while [ $# -gt 0 ]; do
     shift
 done
 
+# a fresh container often lacks the caller's locale (e.g. en_US.UTF-8 passed in
+# by pct exec): C.UTF-8 always exists and keeps perl/apt quiet
+export LC_ALL=C.UTF-8 LANG=C.UTF-8 LANGUAGE=
+
 info() { echo "[proxlb-agent] $*"; }
 warn() { echo "[proxlb-agent] WARNING: $*"; }
 die()  { echo "[proxlb-agent] ERROR: $*" >&2; exit 1; }
@@ -88,12 +92,15 @@ info "connecting to cluster '${B[PROXLB_CLUSTER]:-?}' (anchor VM ${B[PROXLB_VMID
 # ------------------------------------------------- base packages (fresh LXC) ---
 pkg_install() { # install packages with the system package manager, if there is one
     if command -v apt-get >/dev/null; then
-        DEBIAN_FRONTEND=noninteractive apt-get update -qq
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@" >/dev/null
+        # never wait for input: no apt-listchanges pager, keep existing config files
+        export DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none NEEDRESTART_MODE=a
+        apt-get update -qq </dev/null
+        apt-get install -y -qq -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
+            "$@" </dev/null >/dev/null
     elif command -v dnf >/dev/null; then
-        dnf install -y -q "$@"
+        dnf install -y -q "$@" </dev/null
     elif command -v yum >/dev/null; then
-        yum install -y -q "$@"
+        yum install -y -q "$@" </dev/null
     else
         return 1
     fi
@@ -109,7 +116,7 @@ fi
 # ------------------------------------------------------------- cluster CA ---
 if [ -d /usr/local/share/ca-certificates ] && command -v update-ca-certificates >/dev/null; then
     install -m 0644 "$TMP/pve-root-ca.pem" /usr/local/share/ca-certificates/proxlb-pve-root-ca.crt
-    update-ca-certificates >/dev/null
+    update-ca-certificates >/dev/null 2>&1 || die "update-ca-certificates failed"
     CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 elif [ -d /etc/pki/ca-trust/source/anchors ] && command -v update-ca-trust >/dev/null; then
     install -m 0644 "$TMP/pve-root-ca.pem" /etc/pki/ca-trust/source/anchors/proxlb-pve-root-ca.pem
@@ -137,13 +144,15 @@ if [ -z "$PY" ]; then
         pkg_install python3-venv || true
         python3 -m venv /opt/proxlb/venv || die "python3 venv module missing (Debian: apt install python3-venv)"
     fi
-    /opt/proxlb/venv/bin/pip install --quiet --upgrade pip
+    info "installing ProxLB and its Python packages with pip - this takes 2-5 minutes, please wait"
+    /opt/proxlb/venv/bin/pip install --quiet --disable-pip-version-check --upgrade pip </dev/null
     if [ -f "$REPO_ROOT/setup.py" ] && [ -d "$REPO_ROOT/proxlb" ]; then
-        /opt/proxlb/venv/bin/pip install --quiet "$REPO_ROOT"
+        /opt/proxlb/venv/bin/pip install --quiet --disable-pip-version-check "$REPO_ROOT" </dev/null
     else
-        /opt/proxlb/venv/bin/pip install --quiet "git+https://github.com/jwklijnsma/ProxLB.git"
+        /opt/proxlb/venv/bin/pip install --quiet --disable-pip-version-check "git+https://github.com/jwklijnsma/ProxLB.git" </dev/null
     fi
     PY=/opt/proxlb/venv/bin/python
+    info "ProxLB installed"
 fi
 has_proxlb "$PY" || die "$PY cannot import proxlb, proxmoxer and yaml"
 info "using $PY ($("$PY" -m proxlb --version 2>/dev/null | head -1))"

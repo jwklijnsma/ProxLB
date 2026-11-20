@@ -344,7 +344,7 @@ fi
 # -------------------------------------------- connect the target (optional) ---
 # The same one-line script runs in the container or on the SSH host: unpack the
 # ProxLB source, run install-agent.sh with the bundle, delete both again.
-REMOTE_SCRIPT='set -e; trap "rm -rf /root/proxlb-src /root/proxlb-src.tgz /root/proxlb-bundle.tar" EXIT; rm -rf /root/proxlb-src; mkdir -p /root/proxlb-src; tar -xzf /root/proxlb-src.tgz -C /root/proxlb-src; bash /root/proxlb-src/contrib/proxmox/agent/install-agent.sh --bundle /root/proxlb-bundle.tar'
+REMOTE_SCRIPT='export LC_ALL=C.UTF-8 LANG=C.UTF-8 LANGUAGE= APT_LISTCHANGES_FRONTEND=none DEBIAN_FRONTEND=noninteractive; set -e; trap "rm -rf /root/proxlb-src /root/proxlb-src.tgz /root/proxlb-bundle.tar" EXIT; rm -rf /root/proxlb-src; mkdir -p /root/proxlb-src; tar -xzf /root/proxlb-src.tgz -C /root/proxlb-src; bash /root/proxlb-src/contrib/proxmox/agent/install-agent.sh --bundle /root/proxlb-bundle.tar'
 
 make_source_tgz() { # $1 = output file
     local root
@@ -360,16 +360,17 @@ ct_push() { # $1 local file, $2 path in the container, $3 mode
         pct push "$TARGET_CT" "$1" "$2" --perms "$3"
     else
         local tmp="/tmp/proxlb-push.$$"
-        scp -q -o BatchMode=yes "$1" "root@$CT_IP:$tmp"
+        # ssh + cat instead of scp (scp via SFTP fails on some PVE 9 nodes)
+        ssh -o BatchMode=yes "root@$CT_IP" "cat > $tmp" < "$1"
         ssh -o BatchMode=yes "root@$CT_IP" "pct push $TARGET_CT $tmp $2 --perms $3; rc=\$?; rm -f $tmp; exit \$rc"
     fi
 }
 
 ct_exec() { # $1 = one-line script
     if [ -z "$CT_IP" ]; then
-        pct exec "$TARGET_CT" -- bash -c "$1"
+        pct exec "$TARGET_CT" -- bash -c "$1" </dev/null
     else
-        ssh -o BatchMode=yes "root@$CT_IP" "pct exec $TARGET_CT -- bash -c $(printf '%q' "$1")"
+        ssh -o BatchMode=yes "root@$CT_IP" "pct exec $TARGET_CT -- bash -c $(printf '%q' "$1")" </dev/null
     fi
 }
 
@@ -397,8 +398,8 @@ if [ -n "$TARGET_CT" ] || [ -n "$TARGET_SSH" ]; then
         CONNECTED="LXC $TARGET_CT"
     else
         info "installing proxlb-agent on $TARGET_SSH (this can take a few minutes the first time)"
-        scp -q "$SRC_TGZ" "$TARGET_SSH:/root/proxlb-src.tgz"
-        scp -q "$BUNDLE" "$TARGET_SSH:/root/proxlb-bundle.tar"
+        ssh "$TARGET_SSH" "umask 077; cat > /root/proxlb-src.tgz" < "$SRC_TGZ"
+        ssh "$TARGET_SSH" "umask 077; cat > /root/proxlb-bundle.tar" < "$BUNDLE"
         ssh "$TARGET_SSH" "chmod 600 /root/proxlb-bundle.tar; bash -c $(printf '%q' "$REMOTE_SCRIPT")" || rc=$?
         CONNECTED="$TARGET_SSH"
     fi
