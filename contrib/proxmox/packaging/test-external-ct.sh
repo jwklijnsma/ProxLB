@@ -127,7 +127,7 @@ assert a["user"] == "proxlb@pve" and a["token_id"] == "external138" and a["token
 assert a["hosts"] == ["127.0.0.1"] and a["ssl_verification"] is True, a
 PYEOF
 [ -f /opt/proxlb/agent/proxlb-agent.py ] && [ -f /opt/proxlb/agent/tls-relax/sitecustomize.py ] || fail "agent files"
-grep -q "enable --now proxlb-agent.service" "$LOG" || fail "agent service not enabled"
+grep -q "restart proxlb-agent.service" "$LOG" || fail "agent service not restarted"
 pass "agent configured for anchor VM 138 with the new token"
 
 echo "== second run reuses everything, no new token"

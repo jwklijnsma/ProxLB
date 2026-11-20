@@ -1,0 +1,5 @@
+Added:
+  - proxlb-ctl check (proxlb-agent.py --check) tests config, network/TLS to every node, the token, the status guest and the permissions and prints a fix for each problem; install-agent.sh runs it at the end.
+Fixed:
+  - The agent kept using an old API token after install-agent.sh wrote a new one (only "enable --now", no restart, and API settings read once at start) and then failed with 401 on every node; install-agent.sh now restarts the agent, the agent reloads changed proxmox_api settings by itself, and a 401 stops at the first node with a clear hint.
+  - GUI 1.3.0 no longer shows "No migrations - the cluster is balanced", a default threshold or a cluster verdict before the agent has reported; it points to proxlb-ctl check instead.

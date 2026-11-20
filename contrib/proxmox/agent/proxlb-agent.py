@@ -251,6 +251,19 @@ def render_description(status: Json) -> str:
 # --------------------------------------------------------------------------
 # Proxmox API access
 # --------------------------------------------------------------------------
+def parse_host(host: Any) -> tuple[str, int]:
+    """'10.0.0.1', '10.0.0.1:8006', '[fd00::1]:8006' -> (host, port)."""
+    host_s = str(host)
+    port = 8006
+    if host_s.startswith("["):  # [v6]:port
+        h, _, p = host_s[1:].partition("]")
+        host_s, port = h, int(p.lstrip(":") or 8006)
+    elif host_s.count(":") == 1:
+        host_s, p = host_s.split(":")
+        port = int(p)
+    return host_s, port
+
+
 class Pve:
     def __init__(self, cfg: Json) -> None:
         self.api_cfg = cfg.get("proxmox_api") or {}
@@ -262,14 +275,7 @@ class Pve:
         hosts = self.api_cfg.get("hosts") or []
         last_err: Optional[Exception] = None
         for host in hosts:
-            host_s = str(host)
-            port = 8006
-            if host_s.startswith("["):  # [v6]:port
-                h, _, p = host_s[1:].partition("]")
-                host_s, port = h, int(p.lstrip(":") or 8006)
-            elif host_s.count(":") == 1:
-                host_s, p = host_s.split(":")
-                port = int(p)
+            host_s, port = parse_host(host)
             kwargs: dict[str, Any] = {
                 "port": port,
                 "verify_ssl": bool(self.api_cfg.get("ssl_verification", True)),
@@ -288,6 +294,13 @@ class Pve:
                 self.api = api
                 return api
             except Exception as err:  # noqa: BLE001 - try the next host
+                if getattr(err, "status_code", None) == 401 or "401" in str(err):
+                    # a token is valid on every node or on none: stop here
+                    raise RuntimeError(
+                        f"API login rejected by {host} (401): the token "
+                        f"{self.api_cfg.get('user')}!{self.api_cfg.get('token_id')} is wrong or was "
+                        "replaced - run 'proxlb-ctl check'; a new token: proxlb-external "
+                        "--rotate-token --vmid <anchor> --ct <ctid>") from err
                 last_err = err
                 log.warning("Proxmox API %s not usable: %s", host, err)
         raise RuntimeError(f"no Proxmox API host reachable: {last_err}")
@@ -344,6 +357,7 @@ class Agent:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.cfg = self.load_cfg()
         self.pve = Pve(self.cfg)
+        self.api_cfg: Json = dict(self.cfg.get("proxmox_api") or {})
         self.status: Json = self.load_last_status()
         self.next_run = now_ts() + schedule_seconds(self.cfg)
         self.last_publish = 0
@@ -451,7 +465,22 @@ class Agent:
                 return name
         return None
 
+    def reload_api_if_changed(self) -> None:
+        """Take a new token / host list from proxlb.yaml without a restart."""
+        try:
+            fresh = self.load_cfg()
+        except (OSError, yaml.YAMLError) as err:
+            log.error("cannot read %s: %s", self.config_path, err)
+            return
+        fresh_api = dict(fresh.get("proxmox_api") or {})
+        if fresh_api != self.api_cfg:
+            log.info("proxmox_api in %s changed - reconnecting with the new settings", self.config_path)
+            self.pve = Pve(fresh)
+            self.api_cfg = fresh_api
+        self.cfg = fresh
+
     def tick(self) -> None:
+        self.reload_api_if_changed()
         try:
             node, tags, resources = self.pve.cluster_state(self.ctid, self.guest_type)
         except Exception as err:  # noqa: BLE001
@@ -517,13 +546,149 @@ class Agent:
         self.stop = True
 
 
+# --------------------------------------------------------------------------
+# Self-check: proxlb-ctl check  (proxlb-agent.py --check)
+# --------------------------------------------------------------------------
+REQUIRED_ROOT_PRIVS = ("Sys.Audit", "VM.Audit", "VM.Migrate", "Datastore.Audit")
+
+
+def system_ca_bundle() -> Optional[str]:
+    for path in (os.environ.get("REQUESTS_CA_BUNDLE"), "/etc/ssl/certs/ca-certificates.crt",
+                 "/etc/pki/tls/certs/ca-bundle.crt"):
+        if path and os.path.isfile(path):
+            return path
+    return None
+
+
+def run_check(agent_cfg: Json, out: Any = None) -> int:
+    """Test every link between this agent and the web interface; return 0 if all OK."""
+    import requests
+
+    stream = out or sys.stdout
+    problems = 0
+
+    def say(state: str, text: str, hint: str = "") -> None:
+        nonlocal problems
+        if state == "FAIL":
+            problems += 1
+        print(f"[{state:4}] {text}", file=stream)
+        if hint:
+            print(f"       -> {hint}", file=stream)
+
+    vmid = int(agent_cfg.get("vmid") or agent_cfg.get("ctid") or 0)
+    gtype = str(agent_cfg.get("guest_type", "lxc"))
+    cfg_path = agent_cfg.get("proxlb_config", "/etc/proxlb/proxlb.yaml")
+    say("OK" if vmid else "FAIL", f"agent.yaml: status guest {gtype} {vmid or '?'}",
+        "" if vmid else "set vmid: <ID> in /etc/proxlb/agent.yaml")
+    try:
+        with open(cfg_path, encoding="utf-8") as fh:
+            cfg = cast(Json, yaml.safe_load(fh) or {})
+    except OSError as err:
+        say("FAIL", f"cannot read {cfg_path}: {err}")
+        return 1
+    api_cfg = cfg.get("proxmox_api") or {}
+    hosts = api_cfg.get("hosts") or []
+    verify = bool(api_cfg.get("ssl_verification", True))
+    auth = (f"{api_cfg.get('user')}!{api_cfg.get('token_id')}" if api_cfg.get("token_id")
+            else f"{api_cfg.get('user')} (password)")
+    say("OK" if hosts else "FAIL", f"{cfg_path}: {len(hosts)} API host(s), auth {auth}, "
+        f"ssl_verification {verify}", "" if hosts else "add proxmox_api.hosts")
+
+    if bool(agent_cfg.get("tls_relax_x509_strict", True)):
+        enable_tls_relax()
+    ca = system_ca_bundle()
+    if ca:
+        os.environ.setdefault("REQUESTS_CA_BUNDLE", ca)
+
+    reachable = 0
+    for host in hosts:
+        h, port = parse_host(host)
+        url = f"https://[{h}]:{port}/api2/json/version" if ":" in h else f"https://{h}:{port}/api2/json/version"
+        try:
+            requests.get(url, timeout=5, verify=(ca or True) if verify else False)
+            say("OK", f"{host}: reachable, TLS {'verified' if verify else 'NOT verified'}")
+            reachable += 1
+        except requests.exceptions.SSLError as err:
+            try:
+                requests.get(url, timeout=5, verify=False)
+                say("FAIL", f"{host}: reachable, but TLS verification fails: {err}",
+                    "the node certificate is not signed by a trusted CA or not issued for this "
+                    "address (custom/ACME certificate?). Trust its CA, use host names in "
+                    "proxmox_api.hosts, or set ssl_verification: False")
+            except Exception:  # noqa: BLE001
+                say("FAIL", f"{host}: TLS error: {err}")
+        except requests.exceptions.RequestException as err:
+            say("FAIL", f"{host}: not reachable: {err.__class__.__name__}",
+                "check routing/firewall to TCP 8006 from this machine")
+    if not reachable:
+        return problems or 1
+
+    pve = Pve(cfg)
+    try:
+        api = pve.connect()
+        say("OK", "API login with the token works")
+    except Exception as err:  # noqa: BLE001
+        msg = str(err)
+        hint = ("token or secret rejected - create a new one: proxlb-external --rotate-token --vmid "
+                f"{vmid}" if "401" in msg or "authentication" in msg.lower() else "")
+        say("FAIL", f"API login failed: {msg}", hint)
+        return problems
+
+    try:
+        node, tags, _ = pve.cluster_state(vmid, gtype)
+        say("OK", f"{gtype} {vmid} found on node {node}, tags: {';'.join(tags) or '-'}")
+        if "proxlb" not in tags:
+            say("FAIL", f"{gtype} {vmid} has no tag 'proxlb' - the web interface will not find it",
+                f"add the tag 'proxlb' to {gtype} {vmid}")
+    except Exception as err:  # noqa: BLE001
+        say("FAIL", f"status guest not found: {err}",
+            f"is {gtype} {vmid} right? (anchor VM: guest_type qemu, ProxLB container: lxc)")
+        return problems
+
+    def privs(path: str) -> set[str]:
+        data = api.access.permissions.get(path=path)
+        return {k for k, v in (cast(Json, data).get(path) or {}).items() if v}
+
+    try:
+        root = privs("/")
+        missing = [p for p in REQUIRED_ROOT_PRIVS if p not in root]
+        root_msg = f"missing {', '.join(missing)}" if missing else "ProxLB can read and migrate"
+        say("FAIL" if missing else "OK", f"permissions on /: {root_msg}",
+            f"pveum acl modify / --users {api_cfg.get('user')} --roles ProxLB" if missing else "")
+        guest = privs(f"/vms/{vmid}")
+        ok = "VM.Config.Options" in guest
+        say("OK" if ok else "FAIL",
+            f"permission VM.Config.Options on /vms/{vmid} (write status, read commands): "
+            f"{'yes' if ok else 'MISSING'}",
+            "" if ok else f"pveum acl modify /vms/{vmid} --users {api_cfg.get('user')} --roles ProxLBAgent")
+    except Exception as err:  # noqa: BLE001
+        say("WARN", f"could not read permissions: {err}")
+
+    state = Path(agent_cfg.get("state_dir", "/var/lib/proxlb")) / "status.json"
+    try:
+        st = json.loads(state.read_text())
+        say("OK", f"last run: {fmt_time(st.get('finished'))}, ok={st.get('ok')}, "
+            f"moves={st.get('moves_total')}, error={st.get('error')}")
+    except (OSError, ValueError):
+        say("WARN", "no run yet on this machine (status.json missing)",
+            "the agent runs a dry-run within ~10 s after it starts: systemctl status proxlb-agent")
+
+    print(f"\n{'all checks passed' if not problems else f'{problems} problem(s) found'}", file=stream)
+    return 1 if problems else 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=(__doc__ or "").strip().split("\n")[0])
     parser.add_argument("-c", "--config", default="/etc/proxlb/agent.yaml")
+    parser.add_argument("--check", action="store_true",
+                        help="test config, network/TLS, token, status guest and permissions, then exit")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     with open(args.config, encoding="utf-8") as fh:
         agent_cfg = yaml.safe_load(fh) or {}
+    if args.check:
+        logging.getLogger().setLevel(logging.ERROR)
+        sys.exit(run_check(agent_cfg))
     Agent(agent_cfg).loop()
 
 

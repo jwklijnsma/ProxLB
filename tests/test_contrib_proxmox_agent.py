@@ -268,6 +268,46 @@ class TestAgentLoop(unittest.TestCase):
             self.assertFalse(ctx.verify_flags & getattr(ssl, "VERIFY_X509_STRICT", 0))
             self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)  # still verifying
 
+    def test_new_token_in_config_is_picked_up_without_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            a = self.make_agent(tmp, ["proxlb"])
+            mock_pve = a.pve
+            a.startup_run_done = True
+            a.tick()
+            self.assertIs(a.pve, mock_pve)  # unchanged config: same connection
+            cfg = dict(CFG)
+            cfg["proxmox_api"] = {"hosts": ["10.0.0.1"], "user": "proxlb@pve",
+                                  "token_id": "external1000", "token_secret": "new"}
+            Path(tmp, "proxlb.yaml").write_text(json.dumps(cfg))
+            a.reload_api_if_changed()
+            self.assertIsNot(a.pve, mock_pve)
+            self.assertEqual(a.pve.api_cfg["token_secret"], "new")
+
+    def test_401_stops_at_first_host_with_a_hint(self) -> None:
+        calls: list[str] = []
+
+        class Denied(Exception):
+            status_code = 401
+
+        def fake_api(host: str, **_: Any) -> Any:
+            calls.append(host)
+            api = MagicMock()
+            api.version.get.side_effect = Denied("401 Unauthorized: Authentication failed!")
+            return api
+
+        pve = agent.Pve({"proxmox_api": {"hosts": ["10.0.0.1", "10.0.0.2", "10.0.0.3"], "user": "proxlb@pve",
+                                         "token_id": "external1000", "token_secret": "old"}})
+        orig = agent.proxmoxer.ProxmoxAPI
+        agent.proxmoxer.ProxmoxAPI = fake_api
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                pve.connect()
+        finally:
+            agent.proxmoxer.ProxmoxAPI = orig
+        self.assertEqual(calls, ["10.0.0.1"])
+        self.assertIn("proxlb@pve!external1000", str(ctx.exception))
+        self.assertIn("rotate-token", str(ctx.exception))
+
     def test_bad_agent_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(ValueError):
