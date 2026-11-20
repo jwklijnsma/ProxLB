@@ -1,0 +1,2 @@
+Added:
+  - proxlb-external --ct CTID / --ssh USER@HOST connects the ProxLB machine automatically (pushes source + bundle, runs install-agent.sh, deletes the bundle on both sides, tags the LXC plb_ignore_vm); an existing anchor VM is reused with its bundle. install-agent.sh installs missing python3 / ca-certificates / python3-venv in fresh containers.

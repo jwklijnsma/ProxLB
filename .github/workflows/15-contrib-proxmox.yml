@@ -91,6 +91,10 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/src:ro" debian:${{ matrix.debian }} \
             bash -c 'cp -r /src /tmp/repo && bash /tmp/repo/contrib/proxmox/packaging/test-external.sh'
+      - name: proxlb-external --ct (automatic connect of an LXC) with stubbed Proxmox commands
+        run: |
+          docker run --rm -v "$PWD:/src:ro" debian:${{ matrix.debian }} \
+            bash -c 'cp -r /src /tmp/repo && bash /tmp/repo/contrib/proxmox/packaging/test-external-ct.sh'
 
   bundle:
     name: Installer bundle

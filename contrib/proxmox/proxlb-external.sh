@@ -8,6 +8,9 @@
 #
 #    bash proxlb-external.sh                  # next free VMID, anchor "proxlb-anchor"
 #    bash proxlb-external.sh --vmid 9000
+#    bash proxlb-external.sh --ct 150         # ... and connect LXC 150 automatically
+#    bash proxlb-external.sh --vmid 138 --ct 150   # existing anchor 138 -> connect LXC 150
+#    bash proxlb-external.sh --ssh root@mgmt01     # connect a machine over SSH
 #
 #  What it does:
 #    1. creates a tiny "anchor" VM: no disks, no network, never started. It
@@ -21,6 +24,9 @@
 #    4. writes /root/proxlb-external-<VMID>.tar (0600): API hosts, token and
 #       the cluster CA - copy it to the ProxLB machine and run there:
 #         install-agent.sh --bundle proxlb-external-<VMID>.tar
+#       With --ct / --ssh this step is done for you: the ProxLB source and the
+#       bundle are pushed to the target, install-agent.sh runs there, and the
+#       bundle is deleted on both sides afterwards.
 # =============================================================================
 set -euo pipefail
 
@@ -42,10 +48,19 @@ Usage: $CMD [options]
   --no-gui               do not install the web-interface plugin
   --gui-this-node-only   install the plugin only on this node
   --rotate-token         only create a new API token + bundle for an existing anchor VM
+
+Connect the ProxLB machine automatically (instead of copying the bundle):
+  --ct CTID              ProxLB runs in this LXC container of the cluster (any node)
+  --ssh USER@HOST        ProxLB runs on this machine, reachable over SSH as root
+
+An existing anchor VM (--vmid, tag proxlb) is reused, with its bundle if it is
+still in /root; otherwise a new token is created.
 EOF
 }
 
 ROTATE=0
+TARGET_CT=""
+TARGET_SSH=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --vmid) VMID="$2"; shift ;;
@@ -54,6 +69,8 @@ while [ $# -gt 0 ]; do
         --no-gui) GUI=0 ;;
         --gui-this-node-only) GUI_ALL_NODES=0 ;;
         --rotate-token) ROTATE=1 ;;
+        --ct) TARGET_CT="$2"; shift ;;
+        --ssh) TARGET_SSH="$2"; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; usage; exit 1 ;;
     esac
@@ -70,26 +87,75 @@ json_get() { perl -MJSON -e 'my $d = decode_json(join("", <STDIN>)); '"$1"; }
 command -v qm >/dev/null && command -v pveum >/dev/null || die "this is not a Proxmox VE node"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-guest_node() { # node of VMID $1 (any type), empty if it does not exist
-    pvesh get /cluster/resources --type vm --output-format json | \
-        PLB_ID="$1" json_get 'for (@$d) { print $_->{node} if $_->{vmid} == $ENV{PLB_ID} }'
+guest_info() { # "node type status tags" of VMID $1 (any type), empty if it does not exist
+    pvesh get /cluster/resources --type vm --output-format json | PLB_ID="$1" json_get '
+        for (@$d) { next unless $_->{vmid} == $ENV{PLB_ID};
+            print join(" ", $_->{node}, $_->{type}, $_->{status} // "-", $_->{tags} || "-") }'
+}
+guest_node() { guest_info "$1" | awk '{print $1}'; }
+local_node() {
+    pvesh get /cluster/status --output-format json | json_get '
+        for (@$d) { print $_->{name} if $_->{type} eq "node" && $_->{local} }'
+}
+node_ip() {
+    pvesh get /cluster/status --output-format json | PLB_N="$1" json_get '
+        for (@$d) { print $_->{ip} if $_->{type} eq "node" && $_->{name} eq $ENV{PLB_N} }'
 }
 
+[ -n "$TARGET_CT" ] && [ -n "$TARGET_SSH" ] && die "use either --ct or --ssh, not both"
+
+# ------------------------------------------------- check the target first ---
+CT_NODE=""
+CT_IP=""
+if [ -n "$TARGET_CT" ]; then
+    [[ "$TARGET_CT" =~ ^[0-9]+$ ]] || die "--ct needs a container ID"
+    read -r CT_NODE ct_type ct_status _ <<<"$(guest_info "$TARGET_CT")"
+    [ -n "${CT_NODE:-}" ] || die "container $TARGET_CT does not exist"
+    [ "$ct_type" = "lxc" ] || die "$TARGET_CT is not an LXC container (it is: $ct_type)"
+    [ "$ct_status" = "running" ] || die "container $TARGET_CT is $ct_status - start it first: pct start $TARGET_CT"
+    if [ "$CT_NODE" != "$(local_node)" ]; then
+        CT_IP=$(node_ip "$CT_NODE")
+        [ -n "$CT_IP" ] || die "no IP for node $CT_NODE"
+        ssh -o BatchMode=yes "root@$CT_IP" true || die "cannot SSH to node $CT_NODE ($CT_IP) as root"
+    fi
+    info "target: LXC $TARGET_CT on node $CT_NODE"
+fi
+if [ -n "$TARGET_SSH" ]; then
+    ssh -o ConnectTimeout=10 "$TARGET_SSH" true || die "cannot SSH to $TARGET_SSH"
+    info "target: $TARGET_SSH over SSH"
+fi
+
 # ------------------------------------------------------------- anchor VM ---
+REUSE=0
 if [ "$ROTATE" -eq 1 ]; then
     [ -n "$VMID" ] || die "--rotate-token needs --vmid"
     [ -n "$(guest_node "$VMID")" ] || die "VM $VMID does not exist"
+elif [ -n "$VMID" ] && [ -n "$(guest_node "$VMID")" ]; then
+    read -r _ a_type _ a_tags <<<"$(guest_info "$VMID")"
+    if [ "$a_type" = "qemu" ] && [[ ";$a_tags;" == *";proxlb;"* ]]; then
+        REUSE=1
+        info "using the existing anchor VM $VMID"
+    else
+        die "ID $VMID is already in use (and is not a ProxLB anchor VM)"
+    fi
 else
     [ -n "$VMID" ] || VMID=$(pvesh get /cluster/nextid)
-    [ -z "$(guest_node "$VMID")" ] || die "ID $VMID is already in use"
     info "creating anchor VM $VMID ($NAME): no disks, no network, never started"
     qm create "$VMID" --name "$NAME" --memory 64 --cores 1 --ostype other \
         --onboot 0 --tags "proxlb;plb_ignore_vm" --protection 1 \
         --description "ProxLB anchor - status of ProxLB running on another machine. Do not start or delete."
 fi
+BUNDLE="/root/proxlb-external-$VMID.tar"
+NEW_TOKEN=1
+if [ "$REUSE" -eq 1 ] && [ -s "$BUNDLE" ]; then
+    NEW_TOKEN=0
+    info "using the existing bundle $BUNDLE"
+elif [ "$REUSE" -eq 1 ]; then
+    warn "no bundle $BUNDLE any more - creating a new token; an agent that used the old token stops working"
+fi
 
 # -------------------------------------------------------------- API access ---
-info "creating Proxmox user $PVE_USER, roles and API token"
+info "checking Proxmox user $PVE_USER and roles"
 ROLE_PRIVS="Datastore.Audit,Sys.Audit,VM.Audit,VM.Migrate"
 if pveum role list --output-format json | json_get 'exit(!(grep { $_->{roleid} eq "ProxLB" } @$d))'; then
     pveum role modify ProxLB --privs "$ROLE_PRIVS"
@@ -105,10 +171,14 @@ fi
 pveum acl modify / --users "$PVE_USER" --roles ProxLB
 pveum acl modify "/vms/$VMID" --users "$PVE_USER" --roles ProxLBAgent
 TOKEN_NAME="external$VMID"
-pveum user token remove "$PVE_USER" "$TOKEN_NAME" >/dev/null 2>&1 || true
-TOKEN_SECRET=$(pveum user token add "$PVE_USER" "$TOKEN_NAME" --privsep 0 \
-    --comment "external ProxLB, anchor VM $VMID" --output-format json | json_get 'print $d->{value}')
-[ -n "$TOKEN_SECRET" ] || die "could not create API token"
+TOKEN_SECRET=""
+if [ "$NEW_TOKEN" -eq 1 ]; then
+    info "creating API token $PVE_USER!$TOKEN_NAME"
+    pveum user token remove "$PVE_USER" "$TOKEN_NAME" >/dev/null 2>&1 || true
+    TOKEN_SECRET=$(pveum user token add "$PVE_USER" "$TOKEN_NAME" --privsep 0 \
+        --comment "external ProxLB, anchor VM $VMID" --output-format json | json_get 'print $d->{value}')
+    [ -n "$TOKEN_SECRET" ] || die "could not create API token"
+fi
 
 API_HOSTS=$(pvesh get /cluster/status --output-format json | json_get '
     print join(",", map { $_->{ip} } grep { $_->{type} eq "node" && $_->{ip} } @$d)')
@@ -129,7 +199,7 @@ if [ "$ROTATE" -eq 0 ] && [ "$HA" != "no" ] && [ "${NODES:-1}" -ge 2 ]; then
 fi
 
 # ------------------------------------------------------------ GUI plugin ---
-if [ "$GUI" -eq 1 ]; then
+if [ "$GUI" -eq 1 ] && [ "$REUSE" -eq 0 ] && [ "$ROTATE" -eq 0 ]; then
     info "installing the ProxLB tab into the Proxmox web interface"
     GUI_ARGS=()
     [ "$GUI_ALL_NODES" -eq 1 ] && GUI_ARGS+=(--all-nodes)
@@ -143,10 +213,10 @@ if [ "$GUI" -eq 1 ]; then
 fi
 
 # ---------------------------------------------------------------- bundle ---
-BUNDLE="/root/proxlb-external-$VMID.tar"
-TMP=$(mktemp -d)
-umask 077
-cat > "$TMP/connect.env" <<EOF
+if [ "$NEW_TOKEN" -eq 1 ]; then
+    TMP=$(mktemp -d)
+    umask 077
+    cat > "$TMP/connect.env" <<EOF
 # ProxLB external connection - created by proxlb-external.sh on $(hostname) $(date -u +%FT%TZ)
 # Contains an API token secret: keep it private, delete it after use.
 PROXLB_VMID=$VMID
@@ -157,26 +227,119 @@ PROXLB_TOKEN_ID=$TOKEN_NAME
 PROXLB_TOKEN_SECRET=$TOKEN_SECRET
 PROXLB_CLUSTER=$CLUSTER
 EOF
-cp /etc/pve/pve-root-ca.pem "$TMP/pve-root-ca.pem"
-tar -C "$TMP" -cf "$BUNDLE" connect.env pve-root-ca.pem
-chmod 0600 "$BUNDLE"
-rm -rf "$TMP"
+    cp /etc/pve/pve-root-ca.pem "$TMP/pve-root-ca.pem"
+    tar -C "$TMP" -cf "$BUNDLE" connect.env pve-root-ca.pem
+    chmod 0600 "$BUNDLE"
+    rm -rf "$TMP"
+    umask 022
+fi
 
-cat <<EOF
+# -------------------------------------------- connect the target (optional) ---
+# The same one-line script runs in the container or on the SSH host: unpack the
+# ProxLB source, run install-agent.sh with the bundle, delete both again.
+REMOTE_SCRIPT='set -e; trap "rm -rf /root/proxlb-src /root/proxlb-src.tgz /root/proxlb-bundle.tar" EXIT; rm -rf /root/proxlb-src; mkdir -p /root/proxlb-src; tar -xzf /root/proxlb-src.tgz -C /root/proxlb-src; bash /root/proxlb-src/contrib/proxmox/agent/install-agent.sh --bundle /root/proxlb-bundle.tar'
 
-${C_G}Anchor VM $VMID is ready.${C_0} Now connect the machine where ProxLB runs:
+make_source_tgz() { # $1 = output file
+    local root
+    root="$(cd "$SCRIPT_DIR/../.." && pwd)"
+    [ -f "$root/contrib/proxmox/agent/install-agent.sh" ] && [ -f "$root/setup.py" ] \
+        || die "ProxLB source not found next to this script ($root)"
+    tar -C "$root" --exclude=.git --exclude=.github --exclude=docs --exclude=tests --exclude=helm \
+        --exclude=.changelogs --exclude=__pycache__ --exclude='*.pyc' -czf "$1" .
+}
 
-  1. copy the bundle (it holds the API token - keep it private):
-       scp $BUNDLE root@<proxlb-machine>:/root/
+ct_push() { # $1 local file, $2 path in the container, $3 mode
+    if [ -z "$CT_IP" ]; then
+        pct push "$TARGET_CT" "$1" "$2" --perms "$3"
+    else
+        local tmp="/tmp/proxlb-push.$$"
+        scp -q -o BatchMode=yes "$1" "root@$CT_IP:$tmp"
+        ssh -o BatchMode=yes "root@$CT_IP" "pct push $TARGET_CT $tmp $2 --perms $3; rc=\$?; rm -f $tmp; exit \$rc"
+    fi
+}
 
-  2. on the ProxLB machine, as root:
-       git clone https://github.com/jwklijnsma/ProxLB.git
-       bash ProxLB/contrib/proxmox/agent/install-agent.sh --bundle /root/proxlb-external-$VMID.tar
-       rm /root/proxlb-external-$VMID.tar
+ct_exec() { # $1 = one-line script
+    if [ -z "$CT_IP" ]; then
+        pct exec "$TARGET_CT" -- bash -c "$1"
+    else
+        ssh -o BatchMode=yes "root@$CT_IP" "pct exec $TARGET_CT -- bash -c $(printf '%q' "$1")"
+    fi
+}
 
-  3. reload the web interface (Ctrl+F5): Datacenter -> ProxLB shows
-     "ProxLB runs on <proxlb-machine>" within ~30 seconds.
+add_ignore_tag() { # ProxLB must not migrate the container it runs in
+    local tags
+    tags=$(pvesh get "/nodes/$CT_NODE/lxc/$TARGET_CT/config" --output-format json | json_get 'print $d->{tags} // ""')
+    if [[ ";${tags//[, ]/;};" != *";plb_ignore_vm;"* ]]; then
+        pvesh set "/nodes/$CT_NODE/lxc/$TARGET_CT/config" --tags "${tags:+$tags;}plb_ignore_vm"
+        info "tagged LXC $TARGET_CT with plb_ignore_vm (ProxLB never migrates itself)"
+    fi
+}
+
+CONNECTED=""
+if [ -n "$TARGET_CT" ] || [ -n "$TARGET_SSH" ]; then
+    [ -s "$BUNDLE" ] || die "bundle $BUNDLE missing"
+    SRC_TGZ=$(mktemp /tmp/proxlb-src.XXXXXX.tgz)
+    make_source_tgz "$SRC_TGZ"
+    rc=0
+    if [ -n "$TARGET_CT" ]; then
+        info "installing proxlb-agent in LXC $TARGET_CT (this can take a few minutes the first time)"
+        ct_push "$SRC_TGZ" /root/proxlb-src.tgz 0600
+        ct_push "$BUNDLE" /root/proxlb-bundle.tar 0600
+        ct_exec "$REMOTE_SCRIPT" || rc=$?
+        add_ignore_tag || warn "could not tag LXC $TARGET_CT with plb_ignore_vm - add it yourself"
+        CONNECTED="LXC $TARGET_CT"
+    else
+        info "installing proxlb-agent on $TARGET_SSH (this can take a few minutes the first time)"
+        scp -q "$SRC_TGZ" "$TARGET_SSH:/root/proxlb-src.tgz"
+        scp -q "$BUNDLE" "$TARGET_SSH:/root/proxlb-bundle.tar"
+        ssh "$TARGET_SSH" "chmod 600 /root/proxlb-bundle.tar; bash -c $(printf '%q' "$REMOTE_SCRIPT")" || rc=$?
+        CONNECTED="$TARGET_SSH"
+    fi
+    rm -f "$SRC_TGZ"
+    [ "$rc" -eq 0 ] || die "install-agent.sh failed on $CONNECTED (exit $rc) - the bundle stays in $BUNDLE"
+    rm -f "$BUNDLE"
+    info "removed $BUNDLE - it is not needed any more"
+fi
+
+if [ -n "$CONNECTED" ]; then
+    if [ -n "$TARGET_CT" ]; then
+        LOGCMD="pct exec $TARGET_CT -- journalctl -u proxlb-agent -f"
+        AGAIN="--ct $TARGET_CT"
+    else
+        LOGCMD="ssh $TARGET_SSH journalctl -u proxlb-agent -f"
+        AGAIN="--ssh $TARGET_SSH"
+    fi
+    cat <<EOF
+
+${C_G}Done: ProxLB on $CONNECTED is connected to anchor VM $VMID.${C_0}
+
+  Reload the web interface (Ctrl+F5): Datacenter -> ProxLB shows
+  "ProxLB runs on <hostname of $CONNECTED>" within ~30 seconds.
+
+  Agent log:   $LOGCMD
+  New token:   $CMD --rotate-token --vmid $VMID $AGAIN
+EOF
+else
+    cat <<EOF
+
+${C_G}Anchor VM $VMID is ready.${C_0} Connect the machine where ProxLB runs:
+
+  automatically, if ProxLB runs in an LXC of this cluster or is reachable over SSH:
+       $CMD --vmid $VMID --ct <CTID>
+       $CMD --vmid $VMID --ssh root@<proxlb-machine>
+
+  or by hand:
+    1. copy the bundle (it holds the API token - keep it private):
+         scp $BUNDLE root@<proxlb-machine>:/root/
+    2. on the ProxLB machine, as root:
+         git clone https://github.com/jwklijnsma/ProxLB.git
+         bash ProxLB/contrib/proxmox/agent/install-agent.sh --bundle /root/proxlb-external-$VMID.tar
+         rm /root/proxlb-external-$VMID.tar
+
+  Then reload the web interface (Ctrl+F5): Datacenter -> ProxLB shows
+  "ProxLB runs on <proxlb-machine>" within ~30 seconds.
 
   The ProxLB machine must reach the nodes on TCP 8006: $API_HOSTS
   New token later:  $CMD --rotate-token --vmid $VMID
 EOF
+fi
