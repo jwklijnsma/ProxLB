@@ -86,8 +86,8 @@ Then reload the web interface (Ctrl+F5) and open **Datacenter → ProxLB**.
 The script:
 
 1. creates the user `proxlb@pve`, the role `ProxLB` (`Datastore.Audit, Sys.Audit,
-   VM.Audit, VM.Migrate`) on `/`, and the role `ProxLBAgent` (`VM.Config.Options`)
-   only on the ProxLB container itself. Each container gets its own API token,
+   VM.Audit, VM.Migrate`) on `/`, and the role `ProxLBAgent` (the same rights plus
+   `VM.Config.Options`) only on the ProxLB container itself. Each container gets its own API token,
    `proxlb@pve!lxc<CTID>`,
 2. creates an unprivileged Debian 13 (or 12) container tagged `proxlb` and
    `plb_ignore_vm`, so ProxLB never migrates itself,
