@@ -342,8 +342,14 @@ if pveum role list --output-format json | json_get 'exit(!(grep { $_->{roleid} e
 else
     pveum role add ProxLB --privs "$ROLE_PRIVS"
 fi
-if ! pveum role list --output-format json | json_get 'exit(!(grep { $_->{roleid} eq "ProxLBAgent" } @$d))'; then
-    pveum role add ProxLBAgent --privs "VM.Config.Options"
+# A more specific ACL path replaces the inherited roles for the same user, so
+# ProxLBAgent on /vms/<id> must repeat the ProxLB rights; otherwise the guest
+# drops out of /cluster/resources for this user ("... not found in cluster resources").
+AGENT_ROLE_PRIVS="$ROLE_PRIVS,VM.Config.Options"
+if pveum role list --output-format json | json_get 'exit(!(grep { $_->{roleid} eq "ProxLBAgent" } @$d))'; then
+    pveum role modify ProxLBAgent --privs "$AGENT_ROLE_PRIVS"
+else
+    pveum role add ProxLBAgent --privs "$AGENT_ROLE_PRIVS"
 fi
 if ! pveum user list --output-format json | PLB_USER="$PVE_USER" json_get 'exit(!(grep { $_->{userid} eq $ENV{PLB_USER} } @$d))'; then
     pveum user add "$PVE_USER" --comment "ProxLB service user (API token only)"

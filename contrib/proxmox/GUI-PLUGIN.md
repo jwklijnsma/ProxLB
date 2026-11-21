@@ -126,7 +126,7 @@ This creates everything the plugin needs:
 |---|---|
 | Container | unprivileged Debian, tags `proxlb` and `plb_ignore_vm` (ProxLB never moves itself) |
 | API user / token | `proxlb@pve!lxc<CTID>` |
-| Roles | `ProxLB` on `/` (Datastore.Audit, Sys.Audit, VM.Audit, VM.Migrate), `ProxLBAgent` on `/vms/<CTID>` (VM.Config.Options) |
+| Roles | `ProxLB` on `/` (Datastore.Audit, Sys.Audit, VM.Audit, VM.Migrate), `ProxLBAgent` on `/vms/<CTID>` (the same rights plus VM.Config.Options) |
 | Inside the CT | ProxLB in `/opt/proxlb/venv`, `proxlb-agent.service`, `/etc/proxlb/proxlb.yaml`, `/etc/proxlb/agent.yaml` |
 
 About 30 seconds after the container starts, the agent has done its first dry-run
@@ -150,7 +150,7 @@ pct set <CTID> --tags "proxlb;plb_ignore_vm"      # replaces the list: add your 
 **2. Allow the token to write the status and read commands.** Run this on any node:
 
 ```bash
-pveum role add ProxLBAgent --privs VM.Config.Options
+pveum role add ProxLBAgent --privs Datastore.Audit,Sys.Audit,VM.Audit,VM.Migrate,VM.Config.Options
 pveum acl modify /vms/<CTID> --users proxlb@pve --roles ProxLBAgent
 # only if the token has privilege separation (privsep=1):
 pveum acl modify /vms/<CTID> --tokens 'proxlb@pve!mytoken' --roles ProxLBAgent
@@ -357,7 +357,7 @@ Example: a group **proxlb-operators** that may watch and operate ProxLB, but not
 ```bash
 pveum group add proxlb-operators
 pveum acl modify / --groups proxlb-operators --roles PVEAuditor
-pveum role add ProxLBOperator --privs VM.Config.Options 2>/dev/null || true
+pveum role add ProxLBOperator --privs VM.Audit,VM.Config.Options 2>/dev/null || true
 pveum acl modify /vms/<CTID> --groups proxlb-operators --roles ProxLBOperator
 pveum user modify alice@pve --groups proxlb-operators
 ```
@@ -384,7 +384,7 @@ proxlb-ctl check                            # on the ProxLB machine itself
 |---|---|
 | **no ProxLB entry** under Datacenter | The plugin is not loaded on *this* node. Check `grep proxlb-gui /usr/share/pve-manager/index.html.tpl`, then `Ctrl+F5`. Re-apply with `proxlb-gui --reapply` (package) or `bash install-gui.sh`. You also need `Sys.Audit` on `/`. |
 | **not installed - no container with the tag proxlb** | Plugin OK, ProxLB not connected: [Step 2](#step-2---connect-the-plugin-to-proxlb). Check the tag with `pct config <CTID> \| grep tags`. |
-| container shown, **Last run: No run yet** for minutes | The agent isn't running or can't write the Notes. Look at `pct exec <CTID> -- journalctl -u proxlb-agent -n 50`. *"could not publish status"* means `VM.Config.Options` on `/vms/<CTID>` is missing (Step 2B.2). |
+| container shown, **Last run: No run yet** for minutes | The agent isn't running or can't write the Notes. Look at `pct exec <CTID> -- journalctl -u proxlb-agent -n 50`. *"could not publish status"* means `VM.Config.Options` on `/vms/<CTID>` is missing (Step 2B.2). *"qemu/lxc <ID> not found in cluster resources"* means the role on `/vms/<ID>` lacks `VM.Audit`: an ACL on a more specific path replaces the inherited `/` roles of the same user. Fix: `pveum role modify ProxLBAgent --privs Datastore.Audit,Sys.Audit,VM.Audit,VM.Migrate,VM.Config.Options`. |
 | **agent not responding** | No update for more than 15 minutes: the agent stopped or lost the API. Run `pct exec <CTID> -- systemctl status proxlb-agent` and check `proxmox_api.hosts`. |
 | **Last run: failed - ...** | The message is ProxLB's own error, often API rights or an unreachable host. See `pct exec <CTID> -- proxlb-ctl last`. |
 | **command queued** that never finishes | The agent doesn't pick up tags: it's stopped, or it watches another CTID (`ctid:` in `/etc/proxlb/agent.yaml`). |
